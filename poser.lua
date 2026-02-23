@@ -2244,6 +2244,31 @@ do
     return chain
   end
 
+  local function chooseDragPullRoot(dragId)
+    if not (dragId and nodes[dragId]) then return nil end
+
+    local child = dragId
+    while child and nodes[child] do
+      local parentId = nodes[child].parent
+      if not parentId or not nodes[parentId] then
+        return child
+      end
+
+      local parentN = nodes[parentId]
+      local childCount = #(parentN.children or {})
+      if parentN.pinned == true then
+        return child
+      end
+      if childCount > 1 then
+        return child
+      end
+
+      child = parentId
+    end
+
+    return dragId
+  end
+
   local function solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
     if not chain or #chain < 2 then return 0 end
     local n = #chain
@@ -2334,22 +2359,40 @@ do
     local n = nodes[dragId]
     if not n then return end
 
-    local anc = {}
-    local cur = dragId
-    while cur and nodes[cur] do
-      anc[#anc+1] = cur
-      cur = nodes[cur].parent
-    end
-    if #anc < 2 then return end
+    local pullRootId = chooseDragPullRoot(dragId)
+    if not pullRootId then return end
 
-    local chain = {}
-    for i=#anc,1,-1 do chain[#chain+1] = anc[i] end
+    local chain = buildChainRootToNode(pullRootId, dragId)
+    if not chain then return end
+
+    local totalLen = 0
+    for i=1,#chain-1 do
+      local R = restRangeToParent(chain[i+1], restWorld)
+      if R and R > 1e-9 then totalLen = totalLen + R end
+    end
+
     local targetX = (nodes[dragId].worldx or 0)
     local targetY = (nodes[dragId].worldy or 0)
 
-    local rem = solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
-    if rem > 1e-6 then
-      local childId = dragId
+    solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+
+    local rootId = chain[1]
+    local rootN = nodes[rootId]
+    if not rootN then return end
+
+    local dxrt = targetX - (rootN.worldx or 0)
+    local dyrt = targetY - (rootN.worldy or 0)
+    local dRootTarget = math.sqrt(dxrt*dxrt + dyrt*dyrt)
+    if dRootTarget <= totalLen + 1e-6 then
+      return
+    end
+
+    if dRootTarget > 1e-9 and rootN.pinned ~= true then
+      local rem = dRootTarget - totalLen
+      local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
+      moveSubtreeByDelta(rootId, ux*rem, uy*rem, true, nil)
+
+      local childId = rootId
       while true do
         local childN = nodes[childId]
         if not childN then break end
@@ -2357,21 +2400,25 @@ do
         if not pid or not nodes[pid] then break end
         local parentN = nodes[pid]
         if parentN.pinned == true then break end
-        local dx = (childN.worldx or 0) - (parentN.worldx or 0)
-        local dy = (childN.worldy or 0) - (parentN.worldy or 0)
-        local d = math.sqrt(dx*dx + dy*dy)
-        if d < 1e-9 then break end
-        local step = math.min(rem, d)
-        local ux, uy = dx/d, dy/d
-        parentN.worldx = (parentN.worldx or 0) + ux*step
-        parentN.worldy = (parentN.worldy or 0) + uy*step
-        rem = rem - step
-        if rem <= 1e-6 then break end
+
+        local R = restRangeToParent(childId, restWorld)
+        if not R or R <= 1e-9 then break end
+        local vx = (childN.worldx or 0) - (parentN.worldx or 0)
+        local vy = (childN.worldy or 0) - (parentN.worldy or 0)
+        local d = math.sqrt(vx*vx + vy*vy)
+        if d <= R + 1e-6 then break end
+
+        local step = d - R
+        if d > 1e-9 then
+          moveSubtreeByDelta(pid, (vx/d)*step, (vy/d)*step, true, nil)
+        end
         childId = pid
       end
+
       solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
     end
   end
+
 
 
   build2DProximityOverlapMap = function(restWorld)
