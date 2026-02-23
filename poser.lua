@@ -27,6 +27,9 @@
 --           - MMB drag rotates view (yaw/pitch).
 --   - Moving verts in 3D respects camera angle (perspective-aware).
 --   - In 3D, NO Z-based alpha fading.
+--   - Optional 3D alpha effects:
+--       * order alpha: compares each vert to its parent depth from camera POV.
+--       * depth alpha: maps nearest vert to 100% and farthest vert to 10% alpha.
 --
 -- Multi-select:
 --   - Shift+click adds verts to selection (last clicked becomes "last selected").
@@ -196,6 +199,8 @@ do
   -- =========================
   local view3d = false
   local display_spheres = true
+  local order_alpha = false
+  local depth_alpha = false
 
   local VIEW_SENS = 0.010
   local PAN_SENS = 1.0
@@ -640,7 +645,7 @@ do
           end
           local sx = cx + (n.worldx - cx) * view2d.zoom + view2d.panx
           local sy = cy + (n.worldy - cy) * view2d.zoom + view2d.pany
-          proj[id] = { x = sx, y = sy, r = r * view2d.zoom, base = base, zpix = 0, camZ = nil }
+          proj[id] = { x = sx, y = sy, r = r * view2d.zoom, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
         end
       end
       return proj
@@ -674,7 +679,7 @@ do
         local r = base * (f / camZ)
         r = clamp(r, 1, 2000)
 
-        proj[id] = { x = sx, y = sy, r = r, base = base, zpix = zpix, camZ = camZ }
+        proj[id] = { x = sx, y = sy, r = r, base = base, zpix = zpix, camX = camX, camY = camY, camZ = camZ }
       end
     end
 
@@ -694,6 +699,55 @@ do
       y = camR.y * dCamX + camU.y * dCamY,
       z = camR.z * dCamX + camU.z * dCamY,
     }
+  end
+
+  -- =========================
+  -- 3D alpha map
+  -- =========================
+  local function buildAlphaMap(proj)
+    local alpha = {}
+    for _,id in ipairs(order) do alpha[id] = 255 end
+    if not view3d then return alpha end
+
+    local minZ, maxZ = nil, nil
+    if depth_alpha then
+      for _,id in ipairs(order) do
+        local p = proj[id]
+        if p and p.camZ then
+          if (not minZ) or (p.camZ < minZ) then minZ = p.camZ end
+          if (not maxZ) or (p.camZ > maxZ) then maxZ = p.camZ end
+        end
+      end
+    end
+
+    local span = ((maxZ or 0) - (minZ or 0))
+
+    for _,id in ipairs(order) do
+      local p = proj[id]
+      local a = 255
+
+      if order_alpha then
+        local n = nodes[id]
+        if n and n.parent and nodes[n.parent] and p and proj[n.parent] then
+          local pa = proj[n.parent]
+          if (p.camZ or 0) > (pa.camZ or 0) then
+            a = math.min(a, math.floor(255 * 0.30 + 0.5))
+          end
+        end
+      end
+
+      if depth_alpha and p and p.camZ then
+        local t = 0
+        if span > 1e-9 then t = (p.camZ - minZ) / span end
+        t = clamp(t, 0.0, 1.0)
+        local da = (1.0 - t) * 1.0 + t * 0.10
+        a = math.min(a, math.floor(255 * da + 0.5))
+      end
+
+      alpha[id] = clamp(a, 0, 255)
+    end
+
+    return alpha
   end
 
   -- =========================
@@ -1497,6 +1551,8 @@ do
 
     data["view_3d"] = (view3d == true)
     data["display_spheres"] = (display_spheres == true)
+    data["order_alpha"] = (order_alpha == true)
+    data["depth_alpha"] = (depth_alpha == true)
 
     data["cam_yaw"] = yaw
     data["cam_pitch"] = pitch
@@ -1580,6 +1636,8 @@ do
 
     view3d = (t.view_3d == true)
     display_spheres = (t.display_spheres ~= false)
+    order_alpha = (t.order_alpha == true)
+    depth_alpha = (t.depth_alpha == true)
 
     yaw = tonumber(t.cam_yaw) or 0.0
     pitch = clamp(tonumber(t.cam_pitch) or 0.0, -PITCH_MAX, PITCH_MAX)
@@ -1728,18 +1786,20 @@ do
     computeWorldFromActiveLocals()
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
+    local alphaMap = buildAlphaMap(proj)
 
     if view3d then draw3DFloorGrid(gc) end
 
     for k,v in pairs(links) do
       if v == true then
         local a,b = k:match("^(.-)%|(.-)$")
-        local pa, pb = proj[a], proj[b]
-        if pa and pb then
-          gc.color = Color{r=0,g=0,b=0,a=255}
-          drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+          local pa, pb = proj[a], proj[b]
+          if pa and pb then
+            local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+            gc.color = Color{r=0,g=0,b=0,a=aa}
+            drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+          end
         end
-      end
     end
 
     for _,id in ipairs(order) do
@@ -1749,7 +1809,8 @@ do
           local pa = proj[n.parent]
           local pb = proj[id]
           if pa and pb then
-            gc.color = Color{r=0,g=0,b=0,a=255}
+            local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
+            gc.color = Color{r=0,g=0,b=0,a=aa}
             drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
           end
         end
@@ -1760,8 +1821,9 @@ do
       local p = proj[id]
       if p then
         local isSel = (selected[id] == true)
+        local aa = alphaMap[id] or 255
         if isSel then gc.color = Color{r=60,g=220,b=60,a=255}
-        else gc.color = Color{r=0,g=0,b=0,a=255} end
+        else gc.color = Color{r=0,g=0,b=0,a=aa} end
 
         if display_spheres then
           drawCirclePolyline(gc, p.x, p.y, p.r, 52)
@@ -1769,6 +1831,11 @@ do
 
         local px = math.floor(p.x + 0.5)
         local py = math.floor(p.y + 0.5)
+        if isSel then
+          gc.color = Color{r=60,g=220,b=60,a=255}
+        else
+          gc.color = Color{r=0,g=0,b=0,a=aa}
+        end
         gc:fillRect(Rectangle(px-1, py-1, 3, 3))
       end
     end
@@ -1827,6 +1894,8 @@ do
   local function updateControlsFor3D()
     pcall(function()
       dlg:modify{ id="fov", visible=(view3d==true) }
+      dlg:modify{ id="order_alpha", visible=(view3d==true) }
+      dlg:modify{ id="depth_alpha", visible=(view3d==true) }
     end)
   end
 
@@ -1866,6 +1935,8 @@ do
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
       dlg:modify{ id="display_spheres", selected=(display_spheres==true) }
+      dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
+      dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
       dlg:modify{ id="fov", value=clamp(tonumber(fov_deg) or 60, 15, 140) }
 
       updateControlsForState()
@@ -1937,6 +2008,30 @@ do
       end
 
       updateControlsFor3D()
+      dlg:repaint()
+    end
+  }
+
+  dlg:check{
+    id="order_alpha",
+    label="",
+    text="order alpha",
+    selected=false,
+    visible=false,
+    onclick=function()
+      order_alpha = (dlg.data.order_alpha == true)
+      dlg:repaint()
+    end
+  }
+
+  dlg:check{
+    id="depth_alpha",
+    label="",
+    text="depth alpha",
+    selected=false,
+    visible=false,
+    onclick=function()
+      depth_alpha = (dlg.data.depth_alpha == true)
       dlg:repaint()
     end
   }
@@ -2156,6 +2251,8 @@ do
             local pp = proj[pid]
             if pp then
               local f = focalFromFov()
+              local parentCamX = pp.camX or 0
+              local parentCamY = pp.camY or 0
               local parentCamZ = pp.camZ or cam_dist
               if parentCamZ < 0.001 then parentCamZ = 0.001 end
 
@@ -2173,17 +2270,51 @@ do
                 dPlane = R
               end
 
-              local rem2 = (R*R) - (dPlane*dPlane)
-              if rem2 < 0 then rem2 = 0 end
-              local depthMax = math.sqrt(rem2)
+              local depthCam = 0
+              local hitFound = false
+              do
+                local px = (target_sx - cx) / f
+                local py = (target_sy - cy) / f
+                local D = vnorm({x=px, y=py, z=1})
+                local C = {x=parentCamX, y=parentCamY, z=parentCamZ}
+                local a = vdot(D, D)
+                local b = -2.0 * vdot(D, C)
+                local c = vdot(C, C) - (R*R)
+                local disc = (b*b) - (4*a*c)
+                if disc >= 0 then
+                  local sd = math.sqrt(disc)
+                  local inv = 1.0 / (2*a)
+                  local t0 = (-b - sd) * inv
+                  local t1 = (-b + sd) * inv
+                  if t0 > t1 then t0, t1 = t1, t0 end
+                  if t1 > 0 then
+                    local sign = drag.depthSign
+                    if sign == 0 then
+                      local childCamZ = proj[drag.id] and (proj[drag.id].camZ or parentCamZ) or parentCamZ
+                      sign = (childCamZ > parentCamZ) and 1 or -1
+                    end
+                    if sign >= 0 then sign = 1 else sign = -1 end
+                    local t = (sign < 0) and t0 or t1
+                    if t <= 0 then t = t1 end
+                    local hit = {x=D.x*t, y=D.y*t, z=D.z*t}
+                    dCamX = hit.x - C.x
+                    dCamY = hit.y - C.y
+                    depthCam = hit.z - C.z
+                    hitFound = true
+                  end
+                end
+              end
 
-              local overlap = 1.0 - (dPlane / R)
-              overlap = clamp(overlap, 0.0, 1.0)
-
-              local sign = (drag.depthSign ~= 0) and drag.depthSign or depth_pref_sign
-              if sign >= 0 then sign = 1 else sign = -1 end
-
-              local depthCam = sign * depthMax * overlap
+              if not hitFound then
+                local rem2 = (R*R) - (dPlane*dPlane)
+                if rem2 < 0 then rem2 = 0 end
+                local depthMax = math.sqrt(rem2)
+                local overlap = 1.0 - (dPlane / R)
+                overlap = clamp(overlap, 0.0, 1.0)
+                local sign = (drag.depthSign ~= 0) and drag.depthSign or depth_pref_sign
+                if sign >= 0 then sign = 1 else sign = -1 end
+                depthCam = sign * depthMax * overlap
+              end
 
               local offW = {
                 x = camR.x*dCamX + camU.x*dCamY + camF.x*depthCam,
@@ -2241,6 +2372,22 @@ do
         end
       else
         translateSubtree(dW.x, dW.y)
+      end
+
+      if view3d and statePose and not (limit_range and n.parent and nodes[n.parent]) then
+        local baseChild = clamp(tonumber(n.rest_r) or 14, 3, 200)
+        local curEff = (effZ and effZ[drag.id]) and (tonumber(effZ[drag.id]) or 0) or 0
+        local curZpix = baseChild * (curEff / 100.0)
+        local desiredZpix = curZpix + dW.z
+        local desiredEff = 0
+        if math.abs(baseChild) > 1e-9 then
+          desiredEff = (desiredZpix / baseChild) * 100.0
+        end
+        local parentEff = 0
+        if n.parent and effZ and effZ[n.parent] ~= nil then
+          parentEff = tonumber(effZ[n.parent]) or 0
+        end
+        n.pose_z3d = clamp(desiredEff - parentEff, -400, 400)
       end
 
       computeActiveLocalsFromWorld()
@@ -2376,6 +2523,12 @@ do
 
   dlg:modify{ id="display_spheres", selected=true }
   display_spheres = true
+
+  dlg:modify{ id="order_alpha", selected=false }
+  order_alpha = false
+
+  dlg:modify{ id="depth_alpha", selected=false }
+  depth_alpha = false
 
   dlg:modify{ id="fov", value=fov_deg, visible=false }
 
