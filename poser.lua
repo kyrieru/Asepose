@@ -280,7 +280,7 @@ do
     viewRot.lastY = ev.y
 
     yaw = yaw + (dx * VIEW_SENS)
-    pitch = clamp(pitch + (dy * VIEW_SENS), -PITCH_MAX, PITCH_MAX)
+    pitch = clamp(pitch - (dy * VIEW_SENS), -PITCH_MAX, PITCH_MAX)
     camRebuild()
   end
 
@@ -1789,7 +1789,7 @@ do
     drag.mmb_lastY = ev.y
     if dy == 0 then return end
     local step = 1
-    local delta = (dy < 0) and step or -step
+    local delta = (dy < 0) and -step or step
     applyRadiusOrZWithMirror(lastSelected, delta)
     if dlg then dlg:repaint() end
   end
