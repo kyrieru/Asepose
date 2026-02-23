@@ -445,6 +445,8 @@ do
 
       pose_pos_set = false,
 
+      sphere = true,
+
       mirror = nil,
     }
     order[#order+1] = id
@@ -878,18 +880,13 @@ do
   -- =========================
   -- modes
   -- =========================
-  local modeMove = true
   local modeAdd = false
   local mirror_mods = false
   local limit_range = false
 
-  local function setMode(moveOn, addOn, dlg)
-    modeMove = (moveOn == true)
+  local function setMode(addOn, dlg)
     modeAdd = (addOn == true)
-    if modeMove and modeAdd then modeAdd = false end
-    if not modeMove and not modeAdd then modeMove = true end
     if dlg then
-      dlg:modify{ id="mode_move", selected=modeMove }
       dlg:modify{ id="mode_add", selected=modeAdd }
     end
   end
@@ -1083,7 +1080,7 @@ do
           end
         end
 
-        local localZ = clamp(desiredEff - parentEff, -400, 400)
+        local localZ = desiredEff - parentEff
         nn.pose_z3d = localZ
         newEff[cid] = parentEff + localZ
       end
@@ -1104,7 +1101,11 @@ do
     local n = nodes[id]
     if not n then return end
     local cur = getLocalZ(n)
-    setLocalZ(n, clamp(cur + deltaZ, -400, 400))
+    if view3d then
+      setLocalZ(n, cur + deltaZ)
+    else
+      setLocalZ(n, clamp(cur + deltaZ, -400, 400))
+    end
   end
 
   local function applyRadiusOrZWithMirror(id, delta)
@@ -1623,7 +1624,8 @@ do
         if isSel then r, g, b, aa = 60, 220, 60, 255 end
         local pix = app.pixelColor.rgba(r, g, b, aa)
 
-        if display_spheres then
+        local showSphere = (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false)
+        if showSphere then
           drawCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix)
         end
 
@@ -1648,33 +1650,6 @@ do
       local lyr = ensureLayer(PREVIEW_NAME)
       replaceCel(lyr, fr, img, Point(0, 0))
     end)
-  end
-
-  local function applyFromPreview(additive)
-    local fr = app.activeFrame
-    if not fr then return end
-    local previewLayer = findLayerByName(PREVIEW_NAME)
-    if not previewLayer then return end
-    local pc = previewLayer:cel(fr)
-    if not pc or not pc.image then return end
-
-    app.transaction(function()
-      local outLayer = ensureLayer(OUTPUT_NAME)
-      local outImg = Image(spr.width, spr.height, spr.colorMode)
-      outImg:clear()
-      if additive == true then
-        local old = outLayer:cel(fr)
-        if old and old.image then outImg:drawImage(old.image, old.position) end
-      end
-      outImg:drawImage(pc.image, pc.position)
-      replaceCel(outLayer, fr, outImg, Point(0, 0))
-      app.activeLayer = outLayer
-      if additive ~= true then
-        deletePreviewLayer()
-        live_preview = false
-      end
-    end)
-    app.refresh()
   end
 
   local function drawDoubleCircleLink(gc, ax, ay, bx, by, ra, rb)
@@ -1770,6 +1745,21 @@ do
     end
   end
 
+  local function updateSphereUI(dlg)
+    if not dlg then return end
+    if lastSelected and nodes[lastSelected] then
+      dlg:modify{ id="sphere_vert", enabled=true, selected=(nodes[lastSelected].sphere ~= false) }
+    else
+      dlg:modify{ id="sphere_vert", enabled=false, selected=false }
+    end
+  end
+
+  local function normalizeAlphaMode()
+    if order_alpha and depth_alpha then
+      depth_alpha = false
+    end
+  end
+
   -- =========================
   -- save/load
   -- =========================
@@ -1801,7 +1791,6 @@ do
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
 
-    data["mode_move"] = (modeMove == true)
     data["mode_add"] = (modeAdd == true)
     data["state_rest"] = (stateRest == true)
     data["state_pose"] = (statePose == true)
@@ -1846,6 +1835,7 @@ do
       data["node_"..i.."_pose_z2d"] = n.pose_z2d or 0
       data["node_"..i.."_pose_z3d"] = n.pose_z3d or 0
       data["node_"..i.."_mirror"] = n.mirror or ""
+      data["node_"..i.."_sphere"] = (n.sphere ~= false)
     end
 
     local linkKeys = {}
@@ -1882,10 +1872,9 @@ do
     mirror_mods = (t.mirror_mods == true)
     limit_range = (t.limit_range == true)
 
-    modeMove = (t.mode_move == true)
+    local legacyModeMove = (t.mode_move ~= false)
     modeAdd = (t.mode_add == true)
-    if modeMove and modeAdd then modeAdd = false end
-    if not modeMove and not modeAdd then modeMove = true end
+    if not legacyModeMove then modeAdd = true end
 
     stateRest = (t.state_rest == true)
     statePose = (t.state_pose == true)
@@ -1897,6 +1886,7 @@ do
     live_preview = (t.live == true)
     order_alpha = (t.order_alpha == true)
     depth_alpha = (t.depth_alpha == true)
+    normalizeAlphaMode()
 
     yaw = tonumber(t.cam_yaw) or 0.0
     pitch = clamp(tonumber(t.cam_pitch) or 0.0, -PITCH_MAX, PITCH_MAX)
@@ -1961,6 +1951,8 @@ do
           n.pose_z2d = tonumber(z2d) or 0
           n.pose_z3d = tonumber(z3d) or 0
         end
+
+        n.sphere = (t["node_"..i.."_sphere"] ~= false)
       end
     end
 
@@ -2084,7 +2076,8 @@ do
         if isSel then gc.color = Color{r=60,g=220,b=60,a=255}
         else gc.color = Color{r=0,g=0,b=0,a=aa} end
 
-        if display_spheres then
+        local showSphere = (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false)
+        if showSphere then
           drawCirclePolyline(gc, p.x, p.y, p.r, 52)
         end
 
@@ -2152,8 +2145,10 @@ do
       dlg:modify{ id="btn_parent", visible=isRest }
       dlg:modify{ id="btn_mirror", visible=isRest }
       dlg:modify{ id="btn_delete", visible=isRest }
+      dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
       dlg:modify{ id="btn_revert_all", visible=(not isRest) }
+      dlg:modify{ id="btn_reset_view_pose", visible=(not isRest) }
     end)
   end
 
@@ -2194,13 +2189,13 @@ do
       if dlg.data and dlg.data.file then CURRENT_FILE = fileSafe(dlg.data.file) end
       loadGraph()
 
-      setMode(modeMove, modeAdd, dlg)
+      setMode(modeAdd, dlg)
       setState(stateRest, statePose, dlg)
 
       dlg:modify{ id="mirror_mods", selected=(mirror_mods==true) }
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
-      dlg:modify{ id="display_spheres", selected=(display_spheres==true) }
+      updateSphereUI(dlg)
       dlg:modify{ id="live", selected=(live_preview==true) }
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
       dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
@@ -2209,96 +2204,7 @@ do
       updateControlsForState()
       updateControlsFor3D()
       updateLinkUI(dlg)
-      refreshUI()
-    end
-  }
-
-  dlg:newrow()
-  dlg:button{
-    id="btn_reset_view",
-    text="reset view",
-    onclick=function()
-      resetViewToFront()
-      refreshUI()
-    end
-  }
-
-  dlg:newrow()
-  dlg:check{
-    id="mode_move",
-    text="move",
-    selected=true,
-    onclick=function()
-      setMode(true, false, dlg)
-    end
-  }
-  dlg:check{
-    id="mode_add",
-    text="add",
-    selected=false,
-    onclick=function()
-      setMode(false, true, dlg)
-    end
-  }
-
-  dlg:check{
-    id="mirror_mods",
-    label="",
-    text="mirror modifications",
-    selected=false,
-    onclick=function()
-      mirror_mods = (dlg.data.mirror_mods == true)
-    end
-  }
-
-  dlg:check{
-    id="limit_range",
-    label="",
-    text="limit range",
-    selected=false,
-    onclick=function()
-      limit_range = (dlg.data.limit_range == true)
-      refreshUI()
-    end
-  }
-
-  dlg:check{
-    id="view_3d",
-    label="",
-    text="3d",
-    selected=false,
-    onclick=function()
-      view3d = (dlg.data.view_3d == true)
-
-      if view3d and modeAdd then
-        setMode(true, false, dlg)
-      end
-
-      updateControlsFor3D()
-      refreshUI()
-    end
-  }
-
-  dlg:check{
-    id="order_alpha",
-    label="",
-    text="order alpha",
-    selected=false,
-    visible=false,
-    onclick=function()
-      order_alpha = (dlg.data.order_alpha == true)
-      refreshUI()
-    end
-  }
-
-  dlg:check{
-    id="depth_alpha",
-    label="",
-    text="depth alpha",
-    selected=false,
-    visible=false,
-    onclick=function()
-      depth_alpha = (dlg.data.depth_alpha == true)
+      updateSphereUI(dlg)
       refreshUI()
     end
   }
@@ -2338,9 +2244,77 @@ do
       refreshUI()
     end
   }
+  dlg:check{
+    id="live",
+    text="live",
+    selected=false,
+    onclick=function()
+      live_preview = (dlg.data.live == true)
+      refreshUI()
+    end
+  }
+  dlg:check{
+    id="mode_add",
+    text="add",
+    selected=false,
+    onclick=function()
+      setMode(dlg.data.mode_add == true, dlg)
+      refreshUI()
+    end
+  }
 
   dlg:newrow()
 
+  dlg:check{
+    id="view_3d",
+    label="",
+    text="3d",
+    selected=false,
+    onclick=function()
+      view3d = (dlg.data.view_3d == true)
+
+      if view3d and modeAdd then
+        setMode(false, dlg)
+      end
+
+      updateControlsFor3D()
+      refreshUI()
+    end
+  }
+
+  dlg:check{
+    id="order_alpha",
+    label="",
+    text="order alpha",
+    selected=false,
+    visible=false,
+    onclick=function()
+      order_alpha = (dlg.data.order_alpha == true)
+      if order_alpha then
+        depth_alpha = false
+        dlg:modify{ id="depth_alpha", selected=false }
+      end
+      refreshUI()
+    end
+  }
+
+  dlg:check{
+    id="depth_alpha",
+    label="",
+    text="depth alpha",
+    selected=false,
+    visible=false,
+    onclick=function()
+      depth_alpha = (dlg.data.depth_alpha == true)
+      if depth_alpha then
+        order_alpha = false
+        dlg:modify{ id="order_alpha", selected=false }
+      end
+      refreshUI()
+    end
+  }
+
+  dlg:newrow()
   dlg:canvas{
     id="pad",
     width=PAD_W, height=PAD_H,
@@ -2416,6 +2390,7 @@ do
           if not sh then
             clearSelection()
             updateLinkUI(dlg)
+            updateSphereUI(dlg)
             refreshUI()
           end
           return
@@ -2423,17 +2398,19 @@ do
 
         if sh then addToSelection(hit) else setSingleSelection(hit) end
         updateLinkUI(dlg)
+        updateSphereUI(dlg)
 
-        if modeMove then
-          beginDrag(hit, mx, my, proj)
-        elseif modeAdd then
+        if modeAdd and stateRest then
           local newId = createChildAndDrag(hit, mx, my)
           if newId then
             computeWorldFromActiveLocals()
             local effZ2 = statePose and buildEffectiveZMap() or nil
             local proj2 = buildProjectedMap(effZ2)
             beginDrag(newId, mx, my, proj2)
+            updateSphereUI(dlg)
           end
+        else
+          beginDrag(hit, mx, my, proj)
         end
 
         refreshUI()
@@ -2703,6 +2680,15 @@ do
     onclick=function()
       deleteSelectedButKeepChildren()
       updateLinkUI(dlg)
+      updateSphereUI(dlg)
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_reset_view_rest",
+    text="reset view",
+    onclick=function()
+      resetViewToFront()
       refreshUI()
     end
   }
@@ -2713,6 +2699,7 @@ do
     text="revert",
     onclick=function()
       revertSelectedToRest()
+      updateSphereUI(dlg)
       refreshUI()
     end
   }
@@ -2722,6 +2709,15 @@ do
     text="revert all",
     onclick=function()
       revertAllToRest()
+      updateSphereUI(dlg)
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_reset_view_pose",
+    text="reset view",
+    onclick=function()
+      resetViewToFront()
       refreshUI()
     end
   }
@@ -2744,64 +2740,45 @@ do
       refreshUI()
     end
   }
-
-  dlg:newrow()
   dlg:check{
-    id="display_spheres",
-    text="display spheres",
+    id="sphere_vert",
+    text="sphere",
     selected=true,
+    enabled=false,
     onclick=function()
-      display_spheres = (dlg.data.display_spheres == true)
-      refreshUI()
+      if lastSelected and nodes[lastSelected] then
+        nodes[lastSelected].sphere = (dlg.data.sphere_vert == true)
+        refreshUI()
+      else
+        updateSphereUI(dlg)
+      end
     end
   }
-
   dlg:check{
-    id="live",
-    text="live",
+    id="limit_range",
+    text="limit range",
     selected=false,
     onclick=function()
-      live_preview = (dlg.data.live == true)
+      limit_range = (dlg.data.limit_range == true)
+      refreshUI()
+    end
+  }
+  dlg:check{
+    id="mirror_mods",
+    text="mirror modifications",
+    selected=false,
+    onclick=function()
+      mirror_mods = (dlg.data.mirror_mods == true)
       refreshUI()
     end
   }
 
   dlg:newrow()
-  dlg:button{
-    id="btn_apply",
-    text="apply",
-    onclick=function()
-      applyFromPreview(false)
-      if dlg then dlg:modify{ id="live", selected=false } end
-      live_preview = false
-      if dlg then dlg:close() end
-    end
-  }
-
-  dlg:button{
-    id="btn_add",
-    text="add",
-    onclick=function()
-      applyFromPreview(true)
-      refreshUI()
-    end
-  }
-
-  dlg:button{
-    id="btn_cancel",
-    text="cancel",
-    onclick=function()
-      app.transaction(function() deletePreviewLayer() end)
-      live_preview = false
-      if dlg then dlg:close() end
-      app.refresh()
-    end
-  }
 
   resetToSingleCenterNode()
 
   CURRENT_FILE = fileSafe("default.txt")
-  setMode(true, false, dlg)
+  setMode(false, dlg)
   setState(true, false, dlg)
 
   dlg:modify{ id="mirror_mods", selected=false }
@@ -2812,9 +2789,6 @@ do
 
   dlg:modify{ id="view_3d", selected=false }
   view3d = false
-
-  dlg:modify{ id="display_spheres", selected=true }
-  display_spheres = true
 
   dlg:modify{ id="live", selected=false }
   live_preview = false
@@ -2830,6 +2804,7 @@ do
   updateControlsForState()
   updateControlsFor3D()
   updateLinkUI(dlg)
+  updateSphereUI(dlg)
 
   dlg:show{ wait=false }
   refreshUI()
