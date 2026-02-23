@@ -450,6 +450,7 @@ do
       pose_pos_set = false,
 
       sphere = true,
+      pinned = false,
 
       mirror = nil,
 
@@ -1030,9 +1031,13 @@ do
     mmb_lastY=0,
 
     depthSign=0,
+    right=false,
+    startMx=0,
+    startMy=0,
+    moved=false,
   }
 
-  local function beginDrag(id, mx, my, proj)
+  local function beginDrag(id, mx, my, proj, isRightDrag)
     local n = nodes[id]
     if not n then return end
 
@@ -1085,6 +1090,10 @@ do
       local ns = (nodes[id] and tonumber(nodes[id].prox_sign_2d)) or 1
       drag.depthSign = (ns >= 0) and 1 or -1
     end
+    drag.right = (isRightDrag == true)
+    drag.startMx = mx
+    drag.startMy = my
+    drag.moved = false
   end
 
   local function endDrag()
@@ -1102,6 +1111,10 @@ do
     drag.baseSubtreeZpix = nil
     drag.mmb = false
     drag.depthSign = 0
+    drag.right = false
+    drag.startMx = 0
+    drag.startMy = 0
+    drag.moved = false
   end
 
   local function applySubtreePoseZ3DFromRootZpix(desiredRootZpix, liveEffZ)
@@ -1944,7 +1957,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 8
+    data["version"] = 9
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -1997,6 +2010,7 @@ do
       data["node_"..i.."_pose_z3d"] = n.pose_z3d or 0
       data["node_"..i.."_mirror"] = n.mirror or ""
       data["node_"..i.."_sphere"] = (n.sphere ~= false)
+      data["node_"..i.."_pinned"] = (n.pinned == true)
       data["node_"..i.."_prox_sign_2d"] = ((tonumber(n.prox_sign_2d) or 1) >= 0) and 1 or -1
     end
 
@@ -2118,6 +2132,7 @@ do
         end
 
         n.sphere = (t["node_"..i.."_sphere"] ~= false)
+        n.pinned = (t["node_"..i.."_pinned"] == true)
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
         if ps2d == nil then ps2d = 1 end
         n.prox_sign_2d = (ps2d >= 0) and 1 or -1
@@ -2191,6 +2206,171 @@ do
     local dx = c.x - p.x
     local dy = c.y - p.y
     return math.sqrt(dx*dx + dy*dy)
+  end
+
+  local function listToSet(list)
+    local t = {}
+    for _,id in ipairs(list or {}) do t[id] = true end
+    return t
+  end
+
+  local function moveSubtreeByDelta(rootId, dx, dy, skipPinned, skipSet)
+    forEachDescendant(rootId, function(cid)
+      if not (skipSet and skipSet[cid]) then
+        local nn = nodes[cid]
+        if nn then
+          if not (skipPinned and nn.pinned == true) then
+            nn.worldx = (nn.worldx or 0) + dx
+            nn.worldy = (nn.worldy or 0) + dy
+          end
+        end
+      end
+    end)
+  end
+
+  local function buildChainRootToNode(rootId, nodeId)
+    if not (rootId and nodeId and nodes[rootId] and nodes[nodeId]) then return nil end
+    local rev = {}
+    local cur = nodeId
+    while cur and nodes[cur] do
+      rev[#rev+1] = cur
+      if cur == rootId then break end
+      cur = nodes[cur].parent
+    end
+    if #rev == 0 or rev[#rev] ~= rootId then return nil end
+    local chain = {}
+    for i=#rev,1,-1 do chain[#chain+1] = rev[i] end
+    if #chain < 2 then return nil end
+    return chain
+  end
+
+  local function solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+    if not chain or #chain < 2 then return 0 end
+    local n = #chain
+    local pts = {}
+    local limits = {}
+
+    local function clampToMax(px, py, qx, qy, maxD)
+      local dx = qx - px
+      local dy = qy - py
+      local d = math.sqrt(dx*dx + dy*dy)
+      if d > maxD and d > 1e-9 then
+        local s = maxD / d
+        return px + dx*s, py + dy*s
+      end
+      return qx, qy
+    end
+
+    for i=1,n do
+      local nn = nodes[chain[i]]
+      pts[i] = { x = nn.worldx or 0, y = nn.worldy or 0 }
+      if i < n then
+        local R = restRangeToParent(chain[i+1], restWorld)
+        if not R or R <= 1e-9 then
+          local dx = pts[i+1].x - pts[i].x
+          local dy = pts[i+1].y - pts[i].y
+          R = math.sqrt(dx*dx + dy*dy)
+        end
+        limits[i] = R
+      end
+    end
+
+    local rootFixed = { x = pts[1].x, y = pts[1].y }
+
+    for _=1,10 do
+      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
+      for i=2,n do
+        local px, py = pts[i-1].x, pts[i-1].y
+        local qx, qy = pts[i].x, pts[i].y
+        qx, qy = clampToMax(px, py, qx, qy, limits[i-1])
+        pts[i].x, pts[i].y = qx, qy
+      end
+
+      pts[n].x, pts[n].y = targetX, targetY
+      for i=n-1,2,-1 do
+        local px, py = pts[i+1].x, pts[i+1].y
+        local qx, qy = pts[i].x, pts[i].y
+        qx, qy = clampToMax(px, py, qx, qy, limits[i])
+        pts[i].x, pts[i].y = qx, qy
+      end
+
+      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
+      for i=2,n do
+        local px, py = pts[i-1].x, pts[i-1].y
+        local qx, qy = pts[i].x, pts[i].y
+        qx, qy = clampToMax(px, py, qx, qy, limits[i-1])
+        pts[i].x, pts[i].y = qx, qy
+      end
+    end
+
+    for i=1,n do
+      local nn = nodes[chain[i]]
+      if nn and nn.pinned ~= true then
+        nn.worldx, nn.worldy = pts[i].x, pts[i].y
+      end
+    end
+
+    local ex = pts[n].x - targetX
+    local ey = pts[n].y - targetY
+    return math.sqrt(ex*ex + ey*ey)
+  end
+
+
+  local function applyPinnedDescendantIK(movedRootId, movedIds, restWorld)
+    if not (movedRootId and nodes[movedRootId] and movedIds) then return end
+    for _,pidPinned in ipairs(movedIds) do
+      local pn = nodes[pidPinned]
+      if pn and pn.pinned == true and pidPinned ~= movedRootId then
+        local chain = buildChainRootToNode(movedRootId, pidPinned)
+        if chain then
+          local tx, ty = pn.worldx or 0, pn.worldy or 0
+          solveChainFixedRootTarget(chain, tx, ty, restWorld)
+        end
+      end
+    end
+  end
+
+  local function pullAncestorChainForDragged(dragId, movedIds, restWorld)
+    local n = nodes[dragId]
+    if not n then return end
+
+    local anc = {}
+    local cur = dragId
+    while cur and nodes[cur] do
+      anc[#anc+1] = cur
+      cur = nodes[cur].parent
+    end
+    if #anc < 2 then return end
+
+    local chain = {}
+    for i=#anc,1,-1 do chain[#chain+1] = anc[i] end
+    local targetX = (nodes[dragId].worldx or 0)
+    local targetY = (nodes[dragId].worldy or 0)
+
+    local rem = solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+    if rem > 1e-6 then
+      local childId = dragId
+      while true do
+        local childN = nodes[childId]
+        if not childN then break end
+        local pid = childN.parent
+        if not pid or not nodes[pid] then break end
+        local parentN = nodes[pid]
+        if parentN.pinned == true then break end
+        local dx = (childN.worldx or 0) - (parentN.worldx or 0)
+        local dy = (childN.worldy or 0) - (parentN.worldy or 0)
+        local d = math.sqrt(dx*dx + dy*dy)
+        if d < 1e-9 then break end
+        local step = math.min(rem, d)
+        local ux, uy = dx/d, dy/d
+        parentN.worldx = (parentN.worldx or 0) + ux*step
+        parentN.worldy = (parentN.worldy or 0) + uy*step
+        rem = rem - step
+        if rem <= 1e-6 then break end
+        childId = pid
+      end
+      solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+    end
   end
 
 
@@ -2326,8 +2506,10 @@ do
       local pdot = proj[id]
       if p and pdot then
         local isSel = (selected[id] == true)
+        local isPinned = (nodes[id] and nodes[id].pinned == true)
         local aa = alphaMap[id] or 255
         if isSel then gc.color = Color{r=60,g=220,b=60,a=255}
+        elseif isPinned then gc.color = Color{r=70,g=140,b=255,a=255}
         else gc.color = Color{r=0,g=0,b=0,a=aa} end
 
         local showSphere = (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false)
@@ -2339,6 +2521,8 @@ do
         local py = math.floor(pdot.y + 0.5)
         if isSel then
           gc.color = Color{r=60,g=220,b=60,a=255}
+        elseif isPinned then
+          gc.color = Color{r=70,g=140,b=255,a=255}
         else
           gc.color = Color{r=0,g=0,b=0,a=aa}
         end
@@ -2693,9 +2877,20 @@ do
             updateSphereUI(dlg)
           end
         else
-          beginDrag(hit, mx, my, proj)
+          beginDrag(hit, mx, my, proj, false)
         end
 
+        refreshUI()
+        return
+      end
+
+      if btnIs(ev, "RIGHT") then
+        local hit = pickNodeAt(mx,my, proj)
+        if not hit then return end
+        setSingleSelection(hit)
+        updateLinkUI(dlg)
+        updateSphereUI(dlg)
+        beginDrag(hit, mx, my, proj, true)
         refreshUI()
         return
       end
@@ -2724,6 +2919,11 @@ do
       if not drag.active or not drag.id then return end
 
       local mx,my = clampToPad(ev.x, ev.y)
+      if (not drag.moved) then
+        local ddx = mx - (drag.startMx or mx)
+        local ddy = my - (drag.startMy or my)
+        if (ddx*ddx + ddy*ddy) > 9 then drag.moved = true end
+      end
 
       local n = nodes[drag.id]
       if not n then return end
@@ -2766,8 +2966,10 @@ do
           local b = base[cid]
           local nn = nodes[cid]
           if b and nn then
-            nn.worldx = b.x + dx
-            nn.worldy = b.y + dy
+            if nn.pinned ~= true then
+              nn.worldx = b.x + dx
+              nn.worldy = b.y + dy
+            end
           end
         end
       end
@@ -2874,31 +3076,48 @@ do
             if parentN then
               local newRootX = baseRoot.x + dW.x
               local newRootY = baseRoot.y + dW.y
-              local dxp = newRootX - (parentN.worldx or 0)
-              local dyp = newRootY - (parentN.worldy or 0)
-              local dd = math.sqrt(dxp*dxp + dyp*dyp)
-              if dd > R and dd > 1e-9 then
-                local s = R / dd
-                newRootX = (parentN.worldx or 0) + dxp*s
-                newRootY = (parentN.worldy or 0) + dyp*s
+              if not drag.right then
+                local dxp = newRootX - (parentN.worldx or 0)
+                local dyp = newRootY - (parentN.worldy or 0)
+                local dd = math.sqrt(dxp*dxp + dyp*dyp)
+                if dd > R and dd > 1e-9 then
+                  local s = R / dd
+                  newRootX = (parentN.worldx or 0) + dxp*s
+                  newRootY = (parentN.worldy or 0) + dyp*s
+                end
               end
               local dx = newRootX - baseRoot.x
               local dy = newRootY - baseRoot.y
               translateSubtree(dx, dy)
+              if (not view3d) and drag.right then
+                pullAncestorChainForDragged(drag.id, ids, restWorld)
+              end
+              if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
             else
-              translateSubtree(dW.x, dW.y)
+              local dx, dy = dW.x, dW.y
+              translateSubtree(dx, dy)
+              if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld) end
+              if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
             end
           end
         else
           translateSubtree(dW.x, dW.y)
+          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
         end
       else
         if targetRoot and baseRoot then
           local dx = targetRoot.x - baseRoot.x
           local dy = targetRoot.y - baseRoot.y
           translateSubtree(dx, dy)
+          local restWorld2 = computeRestWorldPositions()
+          if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld2) end
+          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld2) end
         else
-          translateSubtree(dW.x, dW.y)
+          local dx, dy = dW.x, dW.y
+          translateSubtree(dx, dy)
+          local restWorld2 = computeRestWorldPositions()
+          if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld2) end
+          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld2) end
         end
       end
 
@@ -2928,7 +3147,18 @@ do
         return
       end
       if btnIs(ev, "LEFT") then
-        if drag.active then endDrag(); refreshUI() end
+        if drag.active and not drag.right then endDrag(); refreshUI() end
+        return
+      end
+      if btnIs(ev, "RIGHT") then
+        if drag.active and drag.right and drag.id then
+          local n = nodes[drag.id]
+          if n and not drag.moved then
+            n.pinned = not (n.pinned == true)
+          end
+          endDrag()
+          refreshUI()
+        end
         return
       end
     end
