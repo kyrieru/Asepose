@@ -214,6 +214,7 @@ do
   local pitch = 0.0
 
   local fov_deg = 60
+  local fov_2d = 60
   local res_scale = 1.0
   local cam_dist = 420.0
   local CAM_DIST_MIN = 30.0
@@ -405,6 +406,7 @@ do
     yaw = 0.0
     pitch = 0.0
     fov_deg = 60
+    fov_2d = 60
     res_scale = 1.0
     cam_dist = 420.0
     pan.x, pan.y, pan.z = 0.0, 0.0, 0.0
@@ -662,6 +664,12 @@ do
   local R_MIN = 3
   local R_MAX = 200
 
+  -- forward declarations (range helpers)
+  local computeRestWorldPositions
+  local restRangeToParent
+  local getFrontSignForRadiusBoost
+  local apply2DProximityRadiusBoost
+
   -- =========================
   -- projection
   -- =========================
@@ -669,6 +677,10 @@ do
     local proj = {}
 
     if not view3d then
+      local restWorld = nil
+      if statePose then
+        restWorld = computeRestWorldPositions()
+      end
       for _,id in ipairs(order) do
         local n = nodes[id]
         if n then
@@ -677,6 +689,10 @@ do
           local r = base
           if statePose then
             r = clamp(base + (base * (ez / 100.0)), 1, 400)
+            if n.parent and nodes[n.parent] and restWorld then
+              local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld)
+              if boosted then r = boosted end
+            end
           end
           local sx = cx + (n.worldx - cx) * view2d.zoom + view2d.panx
           local sy = cy + (n.worldy - cy) * view2d.zoom + view2d.pany
@@ -726,6 +742,11 @@ do
     if (tonumber(res_scale) or 1.0) >= 0.999 then return fallbackProj end
 
     local proj = {}
+    local restWorld = nil
+    if statePose then
+      restWorld = computeRestWorldPositions()
+    end
+
     for _,id in ipairs(order) do
       local n = nodes[id]
       if n then
@@ -734,6 +755,10 @@ do
         local r = base
         if statePose then
           r = clamp(base + (base * (ez / 100.0)), 1, 400)
+          if n.parent and nodes[n.parent] and restWorld then
+            local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld)
+            if boosted then r = boosted end
+          end
         end
         local sx = n.worldx + view2d.panx
         local sy = n.worldy + view2d.pany
@@ -977,7 +1002,8 @@ do
   -- =========================
   -- drag state
   -- =========================
-  local depth_pref_sign = -1
+  local depth_pref_sign = 1
+  local depth_pref_set = false
 
   local drag = {
     active=false,
@@ -1046,7 +1072,7 @@ do
       drag.baseEffZ = eff
       drag.baseSubtreeZpix = subtreeZpix
     end
-    drag.depthSign = depth_pref_sign
+    drag.depthSign = (depth_pref_set and depth_pref_sign or 1)
   end
 
   local function endDrag()
@@ -1904,7 +1930,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 7
+    data["version"] = 8
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -1922,6 +1948,7 @@ do
     data["cam_yaw"] = yaw
     data["cam_pitch"] = pitch
     data["cam_fov"] = fov_deg
+    data["fov_2d"] = fov_2d
     data["res_scale"] = res_scale
     data["cam_dist"] = cam_dist
     data["cam_pan_x"] = pan.x
@@ -1933,6 +1960,7 @@ do
     data["view2d_pany"] = view2d.pany
 
     data["depth_pref_sign"] = depth_pref_sign
+    data["depth_pref_set"] = (depth_pref_set == true)
 
     for i,id in ipairs(order) do
       local n = nodes[id]
@@ -2010,6 +2038,7 @@ do
     yaw = tonumber(t.cam_yaw) or 0.0
     pitch = clamp(tonumber(t.cam_pitch) or 0.0, -PITCH_MAX, PITCH_MAX)
     fov_deg = clamp(tonumber(t.cam_fov) or 60, 15, 140)
+    fov_2d = clamp(tonumber(t.fov_2d) or 60, 15, 140)
     res_scale = clamp(tonumber(t.res_scale) or 1.0, 0.1, 1.0)
     cam_dist = clamp(tonumber(t.cam_dist) or 420.0, CAM_DIST_MIN, CAM_DIST_MAX)
     pan.x = tonumber(t.cam_pan_x) or 0.0
@@ -2021,8 +2050,9 @@ do
     view2d.panx = tonumber(t.view2d_panx) or 0.0
     view2d.pany = tonumber(t.view2d_pany) or 0.0
 
-    depth_pref_sign = tonumber(t.depth_pref_sign) or -1
+    depth_pref_sign = tonumber(t.depth_pref_sign) or 1
     if depth_pref_sign >= 0 then depth_pref_sign = 1 else depth_pref_sign = -1 end
+    depth_pref_set = (t.depth_pref_set == true)
 
     local ncount = tonumber(t.node_count) or 0
     for i=1,ncount do
@@ -2110,7 +2140,7 @@ do
   -- =========================
   -- range helpers (limit range)
   -- =========================
-  local function computeRestWorldPositions()
+  computeRestWorldPositions = function()
     buildChildren()
     local w = {}
     local function rec(id, px, py)
@@ -2134,7 +2164,7 @@ do
     return w
   end
 
-  local function restRangeToParent(id, restWorld)
+  restRangeToParent = function(id, restWorld)
     local n = nodes[id]
     if not n or not n.parent or not nodes[n.parent] then return nil end
     local c = restWorld[id]
@@ -2143,6 +2173,40 @@ do
     local dx = c.x - p.x
     local dy = c.y - p.y
     return math.sqrt(dx*dx + dy*dy)
+  end
+
+  getFrontSignForRadiusBoost = function()
+    local sign = depth_pref_set and depth_pref_sign or 1
+    if drag and drag.active and drag.depthSign and drag.depthSign ~= 0 then
+      sign = drag.depthSign
+    end
+    return (sign >= 0) and 1 or -1
+  end
+
+  apply2DProximityRadiusBoost = function(id, n, base, currentR, restWorld)
+    if not (id and n and base and currentR and restWorld) then return nil end
+    local pid = n.parent
+    if not (pid and nodes[pid]) then return nil end
+
+    local parentN = nodes[pid]
+    local R = restRangeToParent(id, restWorld)
+    if not parentN or not R or R <= 1e-9 then return nil end
+
+    local dxp = (n.worldx or 0) - (parentN.worldx or 0)
+    local dyp = (n.worldy or 0) - (parentN.worldy or 0)
+    local d = math.sqrt(dxp*dxp + dyp*dyp)
+    if d >= R then return currentR end
+
+    local overlap = 1.0 - (d / R)
+    overlap = clamp(overlap, 0.0, 1.0)
+    if overlap <= 0 then return currentR end
+    if getFrontSignForRadiusBoost() <= 0 then return currentR end
+
+    local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
+    local proximityBoost = base * (overlap * fovMul)
+
+    -- only increase final display radius, never decrease
+    return currentR + proximityBoost
   end
 
   -- =========================
@@ -2277,6 +2341,7 @@ do
   local function updateControlsFor3D()
     pcall(function()
       dlg:modify{ id="fov", visible=(view3d==true) }
+      dlg:modify{ id="fov_2d", visible=(view3d~=true) }
       dlg:modify{ id="order_alpha", visible=(view3d==true) }
       dlg:modify{ id="depth_alpha", visible=(view3d==true) }
     end)
@@ -2322,6 +2387,7 @@ do
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
       dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
       dlg:modify{ id="fov", value=clamp(tonumber(fov_deg) or 60, 15, 140) }
+      dlg:modify{ id="fov_2d", value=clamp(tonumber(fov_2d) or 60, 15, 140) }
       dlg:modify{ id="res_scale", value=math.floor(clamp((tonumber(res_scale) or 1.0) * 100, 10, 100) + 0.5) }
 
       updateControlsForState()
@@ -2342,6 +2408,18 @@ do
     visible=false,
     onchange=function()
       fov_deg = clamp(tonumber(dlg.data.fov) or 60, 15, 140)
+      refreshUI()
+    end
+  }
+  dlg:slider{
+    id="fov_2d",
+    label="2D FOV",
+    min=15,
+    max=140,
+    value=fov_2d,
+    visible=true,
+    onchange=function()
+      fov_2d = clamp(tonumber(dlg.data.fov_2d) or 60, 15, 140)
       refreshUI()
     end
   }
@@ -2463,13 +2541,15 @@ do
       if dy == 0 then return end
 
       if drag.active and drag.id then
-        if view3d and limit_range and statePose then
+        if statePose then
           if dy > 0 then
             drag.depthSign = -1
             depth_pref_sign = -1
+            depth_pref_set = true
           else
             drag.depthSign = 1
             depth_pref_sign = 1
+            depth_pref_set = true
           end
           refreshUI()
         end
@@ -2934,7 +3014,11 @@ do
   dlg:modify{ id="depth_alpha", selected=false }
   depth_alpha = false
 
+  depth_pref_sign = 1
+  depth_pref_set = false
+
   dlg:modify{ id="fov", value=fov_deg, visible=false }
+  dlg:modify{ id="fov_2d", value=fov_2d, visible=true }
   dlg:modify{ id="res_scale", value=100, visible=true }
 
   updateControlsForState()
