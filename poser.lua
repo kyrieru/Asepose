@@ -2328,6 +2328,26 @@ do
       end
     end
 
+    -- For max-only constraints there are infinitely many valid solutions. When the
+    -- chain is near taut, bias to a straight rope toward the target to avoid orbiting
+    -- (elbow/shoulder arcing "around" while pulling outward).
+    local totalLen = 0
+    for i=1,n-1 do totalLen = totalLen + (limits[i] or 0) end
+    local dxrt = targetX - rootFixed.x
+    local dyrt = targetY - rootFixed.y
+    local dRootTarget = math.sqrt(dxrt*dxrt + dyrt*dyrt)
+    if totalLen > 1e-9 and dRootTarget >= totalLen * 0.95 and dRootTarget > 1e-9 then
+      local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
+      local acc = 0
+      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
+      for i=2,n do
+        acc = acc + (limits[i-1] or 0)
+        pts[i].x = rootFixed.x + ux * acc
+        pts[i].y = rootFixed.y + uy * acc
+      end
+      pts[n].x, pts[n].y = targetX, targetY
+    end
+
     for i=1,n do
       local nn = nodes[chain[i]]
       if nn and nn.pinned ~= true then
@@ -2364,6 +2384,7 @@ do
 
     local chain = buildChainRootToNode(pullRootId, dragId)
     if not chain then return end
+    local chainSet = listToSet(chain)
 
     local totalLen = 0
     for i=1,#chain-1 do
@@ -2392,27 +2413,28 @@ do
       local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
       moveSubtreeByDelta(rootId, ux*rem, uy*rem, true, nil)
 
-      local childId = rootId
-      while true do
-        local childN = nodes[childId]
-        if not childN then break end
+      -- Keep parent linkage coherent without recursive ancestor chasing; recursive
+      -- propagation here can feed back with the drag target and cause body spin.
+      local childN = nodes[rootId]
+      if childN then
         local pid = childN.parent
-        if not pid or not nodes[pid] then break end
-        local parentN = nodes[pid]
-        if parentN.pinned == true then break end
-
-        local R = restRangeToParent(childId, restWorld)
-        if not R or R <= 1e-9 then break end
-        local vx = (childN.worldx or 0) - (parentN.worldx or 0)
-        local vy = (childN.worldy or 0) - (parentN.worldy or 0)
-        local d = math.sqrt(vx*vx + vy*vy)
-        if d <= R + 1e-6 then break end
-
-        local step = d - R
-        if d > 1e-9 then
-          moveSubtreeByDelta(pid, (vx/d)*step, (vy/d)*step, true, nil)
+        if pid and nodes[pid] then
+          local parentN = nodes[pid]
+          if parentN.pinned ~= true then
+            local R = restRangeToParent(rootId, restWorld)
+            if R and R > 1e-9 then
+              local vx = (childN.worldx or 0) - (parentN.worldx or 0)
+              local vy = (childN.worldy or 0) - (parentN.worldy or 0)
+              local d = math.sqrt(vx*vx + vy*vy)
+              if d > R + 1e-6 and d > 1e-9 then
+                local step = d - R
+                -- Move parent-side hierarchy, but do not re-translate the actively
+                -- dragged chain itself; this avoids feedback loops/spin around hand.
+                moveSubtreeByDelta(pid, (vx/d)*step, (vy/d)*step, true, chainSet)
+              end
+            end
+          end
         end
-        childId = pid
       end
 
       solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
