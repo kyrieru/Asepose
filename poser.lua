@@ -201,6 +201,10 @@ do
   local display_spheres = true
   local order_alpha = false
   local depth_alpha = false
+  local live_preview = false
+
+  local PREVIEW_NAME = "_PoserPreview"
+  local OUTPUT_NAME = "Poser Verts"
 
   local VIEW_SENS = 0.010
   local PAN_SENS = 1.0
@@ -221,6 +225,33 @@ do
   local camF = {x=0,y=0,z=1} -- forward
 
   local function vdot(a,b) return a.x*b.x + a.y*b.y + a.z*b.z end
+
+  local function findLayerByName(name)
+    for _, lyr in ipairs(spr.layers) do
+      if lyr.name == name then return lyr end
+    end
+    return nil
+  end
+
+  local function ensureLayer(name)
+    local lyr = findLayerByName(name)
+    if not lyr then
+      lyr = spr:newLayer()
+      lyr.name = name
+    end
+    return lyr
+  end
+
+  local function deletePreviewLayer()
+    local lyr = findLayerByName(PREVIEW_NAME)
+    if lyr then spr:deleteLayer(lyr) end
+  end
+
+  local function replaceCel(layer, frameObj, img, pos)
+    local old = layer:cel(frameObj)
+    if old then spr:deleteCel(old) end
+    return spr:newCel(layer, frameObj, img, pos or Point(0, 0))
+  end
   local function vcross(a,b)
     return {
       x = a.y*b.z - a.z*b.y,
@@ -1505,6 +1536,147 @@ do
     end
   end
 
+  local function drawPixelStrong(img, x, y, pix)
+    if not pix then return end
+    if x < 0 or y < 0 or x >= img.width or y >= img.height then return end
+    local newA = app.pixelColor.rgbaA(pix)
+    if newA <= 0 then return end
+    local cur = img:getPixel(x, y)
+    local curA = app.pixelColor.rgbaA(cur)
+    if curA >= newA then return end
+    img:drawPixel(x, y, pix)
+  end
+
+  local function drawLineSet(img, x0, y0, x1, y1, pix)
+    if not pix then return end
+    x0 = math.floor(x0 + 0.5); y0 = math.floor(y0 + 0.5)
+    x1 = math.floor(x1 + 0.5); y1 = math.floor(y1 + 0.5)
+    local dx = math.abs(x1 - x0)
+    local sx = (x0 < x1) and 1 or -1
+    local dy = -math.abs(y1 - y0)
+    local sy = (y0 < y1) and 1 or -1
+    local err = dx + dy
+    while true do
+      drawPixelStrong(img, x0, y0, pix)
+      if x0 == x1 and y0 == y1 then break end
+      local e2 = 2 * err
+      if e2 >= dy then err = err + dy; x0 = x0 + sx end
+      if e2 <= dx then err = err + dx; y0 = y0 + sy end
+    end
+  end
+
+  local function drawCirclePolylineToImage(img, cx0, cy0, r, segments, pix)
+    segments = segments or 48
+    if r < 1 then return end
+    local prevx, prevy = nil, nil
+    for i=0,segments do
+      local t = (i / segments) * (math.pi * 2.0)
+      local x = cx0 + math.cos(t) * r
+      local y = cy0 + math.sin(t) * r
+      if prevx ~= nil then drawLineSet(img, prevx, prevy, x, y, pix) end
+      prevx, prevy = x, y
+    end
+  end
+
+  local function renderVertsAndCirclesToImage()
+    computeWorldFromActiveLocals()
+    local effZ = statePose and buildEffectiveZMap() or nil
+    local proj = buildProjectedMap(effZ)
+    local alphaMap = buildAlphaMap(proj)
+
+    local img = Image(spr.width, spr.height, spr.colorMode)
+    img:clear()
+
+    for k,v in pairs(links) do
+      if v == true then
+        local a,b = k:match("^(.-)%|(.-)$")
+        local pa, pb = proj[a], proj[b]
+        if pa and pb then
+          local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+          local pix = app.pixelColor.rgba(0, 0, 0, aa)
+          drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
+        end
+      end
+    end
+
+    for _,id in ipairs(order) do
+      local n = nodes[id]
+      if n and n.parent and nodes[n.parent] then
+        if getLinkState(id, n.parent) then
+          local pa = proj[n.parent]
+          local pb = proj[id]
+          if pa and pb then
+            local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
+            local pix = app.pixelColor.rgba(0, 0, 0, aa)
+            drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
+          end
+        end
+      end
+    end
+
+    for _,id in ipairs(order) do
+      local p = proj[id]
+      if p then
+        local isSel = (selected[id] == true)
+        local aa = alphaMap[id] or 255
+        local r, g, b = 0, 0, 0
+        if isSel then r, g, b, aa = 60, 220, 60, 255 end
+        local pix = app.pixelColor.rgba(r, g, b, aa)
+
+        if display_spheres then
+          drawCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix)
+        end
+
+        local px = math.floor(p.x + 0.5)
+        local py = math.floor(p.y + 0.5)
+        drawPixelStrong(img, px, py, pix)
+      end
+    end
+
+    return img
+  end
+
+  local function updateLivePreviewLayer()
+    if not live_preview then
+      app.transaction(function() deletePreviewLayer() end)
+      return
+    end
+    local fr = app.activeFrame
+    if not fr then return end
+    local img = renderVertsAndCirclesToImage()
+    app.transaction(function()
+      local lyr = ensureLayer(PREVIEW_NAME)
+      replaceCel(lyr, fr, img, Point(0, 0))
+    end)
+  end
+
+  local function applyFromPreview(additive)
+    local fr = app.activeFrame
+    if not fr then return end
+    local previewLayer = findLayerByName(PREVIEW_NAME)
+    if not previewLayer then return end
+    local pc = previewLayer:cel(fr)
+    if not pc or not pc.image then return end
+
+    app.transaction(function()
+      local outLayer = ensureLayer(OUTPUT_NAME)
+      local outImg = Image(spr.width, spr.height, spr.colorMode)
+      outImg:clear()
+      if additive == true then
+        local old = outLayer:cel(fr)
+        if old and old.image then outImg:drawImage(old.image, old.position) end
+      end
+      outImg:drawImage(pc.image, pc.position)
+      replaceCel(outLayer, fr, outImg, Point(0, 0))
+      app.activeLayer = outLayer
+      if additive ~= true then
+        deletePreviewLayer()
+        live_preview = false
+      end
+    end)
+    app.refresh()
+  end
+
   local function drawDoubleCircleLink(gc, ax, ay, bx, by, ra, rb)
     local r1 = math.max(0, ra)
     local r2 = math.max(0, rb)
@@ -1636,6 +1808,7 @@ do
 
     data["view_3d"] = (view3d == true)
     data["display_spheres"] = (display_spheres == true)
+    data["live"] = (live_preview == true)
     data["order_alpha"] = (order_alpha == true)
     data["depth_alpha"] = (depth_alpha == true)
 
@@ -1721,6 +1894,7 @@ do
 
     view3d = (t.view_3d == true)
     display_spheres = (t.display_spheres ~= false)
+    live_preview = (t.live == true)
     order_alpha = (t.order_alpha == true)
     depth_alpha = (t.depth_alpha == true)
 
@@ -1934,6 +2108,8 @@ do
     drag.mmb_lastY = ev.y
   end
 
+  local refreshUI
+
   local function updateMMBAdjust(ev, dlg)
     if not drag.mmb then return end
     if not lastSelected or not nodes[lastSelected] then return end
@@ -1943,7 +2119,7 @@ do
     local step = 1
     local delta = (dy < 0) and -step or step
     applyRadiusOrZWithMirror(lastSelected, delta)
-    if dlg then dlg:repaint() end
+    if dlg then refreshUI() end
   end
 
   local function endMMBAdjust()
@@ -1963,6 +2139,11 @@ do
   end
 
   local dlg = Dialog("Poser (Rest/Pose)")
+
+  refreshUI = function()
+    if dlg then dlg:repaint() end
+    updateLivePreviewLayer()
+  end
 
   local function updateControlsForState()
     local isRest = stateRest
@@ -2020,6 +2201,7 @@ do
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
       dlg:modify{ id="display_spheres", selected=(display_spheres==true) }
+      dlg:modify{ id="live", selected=(live_preview==true) }
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
       dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
       dlg:modify{ id="fov", value=clamp(tonumber(fov_deg) or 60, 15, 140) }
@@ -2027,7 +2209,7 @@ do
       updateControlsForState()
       updateControlsFor3D()
       updateLinkUI(dlg)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2037,7 +2219,7 @@ do
     text="reset view",
     onclick=function()
       resetViewToFront()
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2076,7 +2258,7 @@ do
     selected=false,
     onclick=function()
       limit_range = (dlg.data.limit_range == true)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2093,7 +2275,7 @@ do
       end
 
       updateControlsFor3D()
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2105,7 +2287,7 @@ do
     visible=false,
     onclick=function()
       order_alpha = (dlg.data.order_alpha == true)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2117,7 +2299,7 @@ do
     visible=false,
     onclick=function()
       depth_alpha = (dlg.data.depth_alpha == true)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2131,7 +2313,7 @@ do
     visible=false,
     onchange=function()
       fov_deg = clamp(tonumber(dlg.data.fov) or 60, 15, 140)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2143,7 +2325,7 @@ do
     onclick=function()
       setState(true, false, dlg)
       updateControlsForState()
-      dlg:repaint()
+      refreshUI()
     end
   }
   dlg:check{
@@ -2153,7 +2335,7 @@ do
     onclick=function()
       setState(false, true, dlg)
       updateControlsForState()
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2180,7 +2362,7 @@ do
             drag.depthSign = 1
             depth_pref_sign = 1
           end
-          dlg:repaint()
+          refreshUI()
         end
         return
       end
@@ -2192,7 +2374,7 @@ do
       else
         zoom2DByWheel(dy)
       end
-      dlg:repaint()
+      refreshUI()
     end,
 
     onmousedown=function(ev)
@@ -2234,7 +2416,7 @@ do
           if not sh then
             clearSelection()
             updateLinkUI(dlg)
-            dlg:repaint()
+            refreshUI()
           end
           return
         end
@@ -2254,7 +2436,7 @@ do
           end
         end
 
-        dlg:repaint()
+        refreshUI()
         return
       end
     end,
@@ -2262,17 +2444,17 @@ do
     onmousemove=function(ev)
       if viewPanDrag.active then
         updateViewPan(ev)
-        dlg:repaint()
+        refreshUI()
         return
       end
       if viewRot.active then
         updateViewRotate(ev)
-        dlg:repaint()
+        refreshUI()
         return
       end
       if view2dPanDrag.active then
         updateView2DPan(ev)
-        dlg:repaint()
+        refreshUI()
         return
       end
       if drag.mmb then
@@ -2474,7 +2656,7 @@ do
 
       applyMirrorMoveFromWorld(drag.id)
 
-      dlg:repaint()
+      refreshUI()
     end,
 
     onmouseup=function(ev)
@@ -2486,7 +2668,7 @@ do
         return
       end
       if btnIs(ev, "LEFT") then
-        if drag.active then endDrag(); dlg:repaint() end
+        if drag.active then endDrag(); refreshUI() end
         return
       end
     end
@@ -2499,7 +2681,7 @@ do
     onclick=function()
       doParent()
       updateLinkUI(dlg)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2510,7 +2692,7 @@ do
       if lastSelected and nodes[lastSelected] then
         mirrorSubtreeRest(lastSelected)
         updateLinkUI(dlg)
-        dlg:repaint()
+        refreshUI()
       end
     end
   }
@@ -2521,7 +2703,7 @@ do
     onclick=function()
       deleteSelectedButKeepChildren()
       updateLinkUI(dlg)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2531,7 +2713,7 @@ do
     text="revert",
     onclick=function()
       revertSelectedToRest()
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2540,7 +2722,7 @@ do
     text="revert all",
     onclick=function()
       revertAllToRest()
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2559,7 +2741,7 @@ do
       local b = selectedList[2]
       local on = (dlg.data.link_pair == true)
       setLinkState(a,b,on)
-      dlg:repaint()
+      refreshUI()
     end
   }
 
@@ -2570,15 +2752,50 @@ do
     selected=true,
     onclick=function()
       display_spheres = (dlg.data.display_spheres == true)
-      dlg:repaint()
+      refreshUI()
+    end
+  }
+
+  dlg:check{
+    id="live",
+    text="live",
+    selected=false,
+    onclick=function()
+      live_preview = (dlg.data.live == true)
+      refreshUI()
     end
   }
 
   dlg:newrow()
   dlg:button{
-    id="btn_close",
-    text="close",
-    onclick=function() dlg:close() end
+    id="btn_apply",
+    text="apply",
+    onclick=function()
+      applyFromPreview(false)
+      if dlg then dlg:modify{ id="live", selected=false } end
+      live_preview = false
+      if dlg then dlg:close() end
+    end
+  }
+
+  dlg:button{
+    id="btn_add",
+    text="add",
+    onclick=function()
+      applyFromPreview(true)
+      refreshUI()
+    end
+  }
+
+  dlg:button{
+    id="btn_cancel",
+    text="cancel",
+    onclick=function()
+      app.transaction(function() deletePreviewLayer() end)
+      live_preview = false
+      if dlg then dlg:close() end
+      app.refresh()
+    end
   }
 
   resetToSingleCenterNode()
@@ -2599,6 +2816,9 @@ do
   dlg:modify{ id="display_spheres", selected=true }
   display_spheres = true
 
+  dlg:modify{ id="live", selected=false }
+  live_preview = false
+
   dlg:modify{ id="order_alpha", selected=false }
   order_alpha = false
 
@@ -2612,5 +2832,5 @@ do
   updateLinkUI(dlg)
 
   dlg:show{ wait=false }
-  dlg:repaint()
+  refreshUI()
 end
