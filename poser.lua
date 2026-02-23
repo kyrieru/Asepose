@@ -938,6 +938,8 @@ do
     baseLocalZ=0,
     baseRootCamZ=0,
     baseRootZpix=0,
+    baseEffZ=nil,
+    baseSubtreeZpix=nil,
 
     mmb=false,
     mmb_lastY=0,
@@ -979,6 +981,19 @@ do
     drag.baseLocalZ = getLocalZ(n)
     drag.baseRootCamZ = camZ
     drag.baseRootZpix = (p and p.zpix) or 0
+    drag.baseEffZ = nil
+    drag.baseSubtreeZpix = nil
+
+    if statePose and view3d then
+      local eff = buildEffectiveZMap()
+      local subtreeZpix = {}
+      for _,cid in ipairs(ids) do
+        local pp = proj and proj[cid]
+        subtreeZpix[cid] = (pp and pp.zpix) or 0
+      end
+      drag.baseEffZ = eff
+      drag.baseSubtreeZpix = subtreeZpix
+    end
     drag.depthSign = depth_pref_sign
   end
 
@@ -993,8 +1008,55 @@ do
     drag.baseLocalZ = 0
     drag.baseRootCamZ = 0
     drag.baseRootZpix = 0
+    drag.baseEffZ = nil
+    drag.baseSubtreeZpix = nil
     drag.mmb = false
     drag.depthSign = 0
+  end
+
+  local function applySubtreePoseZ3DFromRootZpix(desiredRootZpix, liveEffZ)
+    if not (statePose and view3d and drag.active and drag.id and desiredRootZpix ~= nil) then return end
+
+    local ids = drag.subtreeIds
+    if not ids or #ids == 0 then return end
+
+    local baseEff = drag.baseEffZ
+    local baseSubtreeZpix = drag.baseSubtreeZpix
+    if not baseEff or not baseSubtreeZpix then return end
+
+    local baseRootZpix = tonumber(drag.baseRootZpix) or 0
+    local deltaRootZpix = desiredRootZpix - baseRootZpix
+    local newEff = {}
+
+    for _,cid in ipairs(ids) do
+      local nn = nodes[cid]
+      if nn then
+        local base = clamp(tonumber(nn.rest_r) or 14, R_MIN, R_MAX)
+        local baseNodeZpix = tonumber(baseSubtreeZpix[cid]) or 0
+        local desiredNodeZpix = baseNodeZpix + deltaRootZpix
+
+        local desiredEff = 0
+        if math.abs(base) > 1e-9 then
+          desiredEff = (desiredNodeZpix / base) * 100.0
+        end
+
+        local pid = nn.parent
+        local parentEff = 0
+        if pid then
+          if newEff[pid] ~= nil then
+            parentEff = newEff[pid]
+          elseif liveEffZ and liveEffZ[pid] ~= nil then
+            parentEff = tonumber(liveEffZ[pid]) or 0
+          elseif baseEff[pid] ~= nil then
+            parentEff = tonumber(baseEff[pid]) or 0
+          end
+        end
+
+        local localZ = clamp(desiredEff - parentEff, -400, 400)
+        nn.pose_z3d = localZ
+        newEff[cid] = parentEff + localZ
+      end
+    end
   end
 
   -- =========================
@@ -2358,19 +2420,9 @@ do
               local dy = newRootY - baseRoot.y
               translateSubtree(dx, dy)
 
-              local baseChild = clamp(tonumber(n.rest_r) or 14, 3, 200)
               local parentZpix = (pp.zpix or 0)
               local desiredChildZpix = parentZpix + offW.z
-
-              local desiredEff = 0
-              if math.abs(baseChild) > 1e-9 then
-                desiredEff = (desiredChildZpix / baseChild) * 100.0
-              end
-
-              local parentEff = 0
-              if effZ and effZ[pid] ~= nil then parentEff = tonumber(effZ[pid]) or 0 end
-              local newLocal = clamp(desiredEff - parentEff, -400, 400)
-              n.pose_z3d = newLocal
+              applySubtreePoseZ3DFromRootZpix(desiredChildZpix, effZ)
             else
               translateSubtree(dW.x, dW.y)
             end
@@ -2409,17 +2461,8 @@ do
       end
 
       if unrestricted3dPose then
-        local baseChild = clamp(tonumber(n.rest_r) or 14, 3, 200)
         local desiredZpix = (targetRoot and targetRoot.zpix) or ((drag.baseRootZpix or 0) + dW.z)
-        local desiredEff = 0
-        if math.abs(baseChild) > 1e-9 then
-          desiredEff = (desiredZpix / baseChild) * 100.0
-        end
-        local parentEff = 0
-        if n.parent and effZ and effZ[n.parent] ~= nil then
-          parentEff = tonumber(effZ[n.parent]) or 0
-        end
-        n.pose_z3d = desiredEff - parentEff
+        applySubtreePoseZ3DFromRootZpix(desiredZpix, effZ)
       end
 
       computeActiveLocalsFromWorld()
