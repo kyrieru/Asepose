@@ -452,6 +452,8 @@ do
       sphere = true,
 
       mirror = nil,
+
+      prox_sign_2d = 1,
     }
     order[#order+1] = id
     return id
@@ -1072,7 +1074,12 @@ do
       drag.baseEffZ = eff
       drag.baseSubtreeZpix = subtreeZpix
     end
-    drag.depthSign = (depth_pref_set and depth_pref_sign or 1)
+    if view3d then
+      drag.depthSign = (depth_pref_set and depth_pref_sign or 1)
+    else
+      local ns = (nodes[id] and tonumber(nodes[id].prox_sign_2d)) or 1
+      drag.depthSign = (ns >= 0) and 1 or -1
+    end
   end
 
   local function endDrag()
@@ -1197,6 +1204,7 @@ do
     n.pose_z3d = 0
     n.worldx, n.worldy = cx, cy
     n.pose_pos_set = false
+    n.prox_sign_2d = 1
 
     buildChildren()
     computeWorldFromActiveLocals()
@@ -1317,6 +1325,7 @@ do
       nodes[nid].pose_z2d = s.pose_z2d or 0
       nodes[nid].pose_z3d = s.pose_z3d or 0
       nodes[nid].pose_pos_set = (s.pose_pos_set == true)
+      nodes[nid].prox_sign_2d = ((tonumber(s.prox_sign_2d) or 1) >= 0) and 1 or -1
     end
 
     local desiredW = {}
@@ -1983,6 +1992,7 @@ do
       data["node_"..i.."_pose_z3d"] = n.pose_z3d or 0
       data["node_"..i.."_mirror"] = n.mirror or ""
       data["node_"..i.."_sphere"] = (n.sphere ~= false)
+      data["node_"..i.."_prox_sign_2d"] = ((tonumber(n.prox_sign_2d) or 1) >= 0) and 1 or -1
     end
 
     local linkKeys = {}
@@ -2103,6 +2113,9 @@ do
         end
 
         n.sphere = (t["node_"..i.."_sphere"] ~= false)
+        local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
+        if ps2d == nil then ps2d = 1 end
+        n.prox_sign_2d = (ps2d >= 0) and 1 or -1
       end
     end
 
@@ -2175,7 +2188,12 @@ do
     return math.sqrt(dx*dx + dy*dy)
   end
 
-  getFrontSignForRadiusBoost = function()
+  getFrontSignForRadiusBoost = function(id)
+    if (not view3d) and id and nodes[id] then
+      local ns = tonumber(nodes[id].prox_sign_2d) or 1
+      return (ns >= 0) and 1 or -1
+    end
+
     local sign = depth_pref_set and depth_pref_sign or 1
     if drag and drag.active and drag.depthSign and drag.depthSign ~= 0 then
       sign = drag.depthSign
@@ -2200,7 +2218,7 @@ do
     local overlap = 1.0 - (d / R)
     overlap = clamp(overlap, 0.0, 1.0)
     if overlap <= 0 then return currentR end
-    if getFrontSignForRadiusBoost() <= 0 then return currentR end
+    if getFrontSignForRadiusBoost(id) <= 0 then return currentR end
 
     local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
     local proximityBoost = base * (overlap * fovMul)
@@ -2542,14 +2560,14 @@ do
 
       if drag.active and drag.id then
         if statePose then
-          if dy > 0 then
-            drag.depthSign = -1
-            depth_pref_sign = -1
+          local sign = (dy > 0) and -1 or 1
+          drag.depthSign = sign
+          if view3d then
+            depth_pref_sign = sign
             depth_pref_set = true
           else
-            drag.depthSign = 1
-            depth_pref_sign = 1
-            depth_pref_set = true
+            local dn = nodes[drag.id]
+            if dn then dn.prox_sign_2d = sign end
           end
           refreshUI()
         end
