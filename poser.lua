@@ -214,6 +214,7 @@ do
   local pitch = 0.0
 
   local fov_deg = 60
+  local res_scale = 1.0
   local cam_dist = 420.0
   local CAM_DIST_MIN = 30.0
   local CAM_DIST_MAX = 4000.0
@@ -404,6 +405,7 @@ do
     yaw = 0.0
     pitch = 0.0
     fov_deg = 60
+    res_scale = 1.0
     cam_dist = 420.0
     pan.x, pan.y, pan.z = 0.0, 0.0, 0.0
     camRebuild()
@@ -716,6 +718,28 @@ do
       end
     end
 
+    return proj
+  end
+
+  local function buildRasterProjectedMap(effZ, fallbackProj)
+    if view3d then return fallbackProj end
+    if (tonumber(res_scale) or 1.0) >= 0.999 then return fallbackProj end
+
+    local proj = {}
+    for _,id in ipairs(order) do
+      local n = nodes[id]
+      if n then
+        local base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX)
+        local ez = (statePose and effZ) and (tonumber(effZ[id]) or 0) or 0
+        local r = base
+        if statePose then
+          r = clamp(base + (base * (ez / 100.0)), 1, 400)
+        end
+        local sx = n.worldx + view2d.panx
+        local sy = n.worldy + view2d.pany
+        proj[id] = { x = sx, y = sy, r = r, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
+      end
+    end
     return proj
   end
 
@@ -1463,20 +1487,38 @@ do
   -- =========================
   -- drawing helpers
   -- =========================
+  local function getResBlock()
+    -- Keep block size in screen pixels independent from camera/2D zoom.
+    local scale = clamp(tonumber(res_scale) or 1.0, 0.1, 1.0)
+    return math.max(1, math.floor((1.0 / scale) + 0.5))
+  end
+
   local function drawLineGC_1px(gc, x0, y0, x1, y1)
-    x0 = math.floor(x0 + 0.5); y0 = math.floor(y0 + 0.5)
-    x1 = math.floor(x1 + 0.5); y1 = math.floor(y1 + 0.5)
-    local dx = math.abs(x1 - x0)
-    local sx = (x0 < x1) and 1 or -1
-    local dy = -math.abs(y1 - y0)
-    local sy = (y0 < y1) and 1 or -1
+    local block = getResBlock()
+    local function plotLow(lx, ly)
+      if block <= 1 then
+        gc:fillRect(Rectangle(lx, ly, 1, 1))
+        return
+      end
+      gc:fillRect(Rectangle(lx * block, ly * block, block, block))
+    end
+
+    local lx0 = math.floor((x0 / block) + 0.5)
+    local ly0 = math.floor((y0 / block) + 0.5)
+    local lx1 = math.floor((x1 / block) + 0.5)
+    local ly1 = math.floor((y1 / block) + 0.5)
+
+    local dx = math.abs(lx1 - lx0)
+    local sx = (lx0 < lx1) and 1 or -1
+    local dy = -math.abs(ly1 - ly0)
+    local sy = (ly0 < ly1) and 1 or -1
     local err = dx + dy
     while true do
-      gc:fillRect(Rectangle(x0, y0, 1, 1))
-      if x0 == x1 and y0 == y1 then break end
+      plotLow(lx0, ly0)
+      if lx0 == lx1 and ly0 == ly1 then break end
       local e2 = 2 * err
-      if e2 >= dy then err = err + dy; x0 = x0 + sx end
-      if e2 <= dx then err = err + dx; y0 = y0 + sy end
+      if e2 >= dy then err = err + dy; lx0 = lx0 + sx end
+      if e2 <= dx then err = err + dx; ly0 = ly0 + sy end
     end
   end
 
@@ -1525,15 +1567,40 @@ do
   end
 
   local function drawCirclePolyline(gc, cx0, cy0, r, segments)
-    segments = segments or 48
     if r < 1 then return end
-    local prevx, prevy = nil, nil
-    for i=0,segments do
-      local t = (i / segments) * (math.pi * 2.0)
-      local x = cx0 + math.cos(t) * r
-      local y = cy0 + math.sin(t) * r
-      if prevx ~= nil then drawLineClipped(gc, prevx, prevy, x, y) end
-      prevx, prevy = x, y
+    local block = getResBlock()
+    local lr = math.floor((r / block) + 0.5)
+    if lr < 1 then lr = 1 end
+    local lcx = math.floor((cx0 / block) + 0.5)
+    local lcy = math.floor((cy0 / block) + 0.5)
+
+    local function plotLow(px, py)
+      if block <= 1 then
+        gc:fillRect(Rectangle(px, py, 1, 1))
+      else
+        gc:fillRect(Rectangle(px * block, py * block, block, block))
+      end
+    end
+
+    local x = lr
+    local y = 0
+    local d = 1 - lr
+    while x >= y do
+      plotLow(lcx + x, lcy + y)
+      plotLow(lcx + y, lcy + x)
+      plotLow(lcx - y, lcy + x)
+      plotLow(lcx - x, lcy + y)
+      plotLow(lcx - x, lcy - y)
+      plotLow(lcx - y, lcy - x)
+      plotLow(lcx + y, lcy - x)
+      plotLow(lcx + x, lcy - y)
+      y = y + 1
+      if d <= 0 then
+        d = d + 2 * y + 1
+      else
+        x = x - 1
+        d = d + 2 * (y - x) + 1
+      end
     end
   end
 
@@ -1550,32 +1617,81 @@ do
 
   local function drawLineSet(img, x0, y0, x1, y1, pix)
     if not pix then return end
-    x0 = math.floor(x0 + 0.5); y0 = math.floor(y0 + 0.5)
-    x1 = math.floor(x1 + 0.5); y1 = math.floor(y1 + 0.5)
-    local dx = math.abs(x1 - x0)
-    local sx = (x0 < x1) and 1 or -1
-    local dy = -math.abs(y1 - y0)
-    local sy = (y0 < y1) and 1 or -1
+    local block = getResBlock()
+    local function plotLow(lx, ly)
+      if block <= 1 then
+        drawPixelStrong(img, lx, ly, pix)
+        return
+      end
+      local gx = lx * block
+      local gy = ly * block
+      for oy=0,block-1 do
+        for ox=0,block-1 do
+          drawPixelStrong(img, gx + ox, gy + oy, pix)
+        end
+      end
+    end
+
+    local lx0 = math.floor((x0 / block) + 0.5)
+    local ly0 = math.floor((y0 / block) + 0.5)
+    local lx1 = math.floor((x1 / block) + 0.5)
+    local ly1 = math.floor((y1 / block) + 0.5)
+
+    local dx = math.abs(lx1 - lx0)
+    local sx = (lx0 < lx1) and 1 or -1
+    local dy = -math.abs(ly1 - ly0)
+    local sy = (ly0 < ly1) and 1 or -1
     local err = dx + dy
     while true do
-      drawPixelStrong(img, x0, y0, pix)
-      if x0 == x1 and y0 == y1 then break end
+      plotLow(lx0, ly0)
+      if lx0 == lx1 and ly0 == ly1 then break end
       local e2 = 2 * err
-      if e2 >= dy then err = err + dy; x0 = x0 + sx end
-      if e2 <= dx then err = err + dx; y0 = y0 + sy end
+      if e2 >= dy then err = err + dy; lx0 = lx0 + sx end
+      if e2 <= dx then err = err + dx; ly0 = ly0 + sy end
     end
   end
 
   local function drawCirclePolylineToImage(img, cx0, cy0, r, segments, pix)
-    segments = segments or 48
     if r < 1 then return end
-    local prevx, prevy = nil, nil
-    for i=0,segments do
-      local t = (i / segments) * (math.pi * 2.0)
-      local x = cx0 + math.cos(t) * r
-      local y = cy0 + math.sin(t) * r
-      if prevx ~= nil then drawLineSet(img, prevx, prevy, x, y, pix) end
-      prevx, prevy = x, y
+    local block = getResBlock()
+    local lr = math.floor((r / block) + 0.5)
+    if lr < 1 then lr = 1 end
+    local lcx = math.floor((cx0 / block) + 0.5)
+    local lcy = math.floor((cy0 / block) + 0.5)
+
+    local function plotLow(px, py)
+      if block <= 1 then
+        drawPixelStrong(img, px, py, pix)
+        return
+      end
+      local gx = px * block
+      local gy = py * block
+      for oy=0,block-1 do
+        for ox=0,block-1 do
+          drawPixelStrong(img, gx + ox, gy + oy, pix)
+        end
+      end
+    end
+
+    local x = lr
+    local y = 0
+    local d = 1 - lr
+    while x >= y do
+      plotLow(lcx + x, lcy + y)
+      plotLow(lcx + y, lcy + x)
+      plotLow(lcx - y, lcy + x)
+      plotLow(lcx - x, lcy + y)
+      plotLow(lcx - x, lcy - y)
+      plotLow(lcx - y, lcy - x)
+      plotLow(lcx + y, lcy - x)
+      plotLow(lcx + x, lcy - y)
+      y = y + 1
+      if d <= 0 then
+        d = d + 2 * y + 1
+      else
+        x = x - 1
+        d = d + 2 * (y - x) + 1
+      end
     end
   end
 
@@ -1583,6 +1699,7 @@ do
     computeWorldFromActiveLocals()
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
+    local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
 
     local img = Image(spr.width, spr.height, spr.colorMode)
@@ -1591,7 +1708,7 @@ do
     for k,v in pairs(links) do
       if v == true then
         local a,b = k:match("^(.-)%|(.-)$")
-        local pa, pb = proj[a], proj[b]
+        local pa, pb = projRaster[a], projRaster[b]
         if pa and pb then
           local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
           local pix = app.pixelColor.rgba(0, 0, 0, aa)
@@ -1604,8 +1721,8 @@ do
       local n = nodes[id]
       if n and n.parent and nodes[n.parent] then
         if getLinkState(id, n.parent) then
-          local pa = proj[n.parent]
-          local pb = proj[id]
+          local pa = projRaster[n.parent]
+          local pb = projRaster[id]
           if pa and pb then
             local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
             local pix = app.pixelColor.rgba(0, 0, 0, aa)
@@ -1616,8 +1733,9 @@ do
     end
 
     for _,id in ipairs(order) do
-      local p = proj[id]
-      if p then
+      local p = projRaster[id]
+      local pdot = proj[id]
+      if p and pdot then
         local isSel = (selected[id] == true)
         local aa = alphaMap[id] or 255
         local r, g, b = 0, 0, 0
@@ -1629,8 +1747,8 @@ do
           drawCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix)
         end
 
-        local px = math.floor(p.x + 0.5)
-        local py = math.floor(p.y + 0.5)
+        local px = math.floor(pdot.x + 0.5)
+        local py = math.floor(pdot.y + 0.5)
         drawPixelStrong(img, px, py, pix)
       end
     end
@@ -1804,6 +1922,7 @@ do
     data["cam_yaw"] = yaw
     data["cam_pitch"] = pitch
     data["cam_fov"] = fov_deg
+    data["res_scale"] = res_scale
     data["cam_dist"] = cam_dist
     data["cam_pan_x"] = pan.x
     data["cam_pan_y"] = pan.y
@@ -1891,6 +2010,7 @@ do
     yaw = tonumber(t.cam_yaw) or 0.0
     pitch = clamp(tonumber(t.cam_pitch) or 0.0, -PITCH_MAX, PITCH_MAX)
     fov_deg = clamp(tonumber(t.cam_fov) or 60, 15, 140)
+    res_scale = clamp(tonumber(t.res_scale) or 1.0, 0.1, 1.0)
     cam_dist = clamp(tonumber(t.cam_dist) or 420.0, CAM_DIST_MIN, CAM_DIST_MAX)
     pan.x = tonumber(t.cam_pan_x) or 0.0
     pan.y = tonumber(t.cam_pan_y) or 0.0
@@ -2037,6 +2157,7 @@ do
     computeWorldFromActiveLocals()
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
+    local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
 
     if view3d then draw3DFloorGrid(gc) end
@@ -2044,7 +2165,7 @@ do
     for k,v in pairs(links) do
       if v == true then
         local a,b = k:match("^(.-)%|(.-)$")
-          local pa, pb = proj[a], proj[b]
+          local pa, pb = projRaster[a], projRaster[b]
           if pa and pb then
             local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
             gc.color = Color{r=0,g=0,b=0,a=aa}
@@ -2057,8 +2178,8 @@ do
       local n = nodes[id]
       if n and n.parent and nodes[n.parent] then
         if getLinkState(id, n.parent) then
-          local pa = proj[n.parent]
-          local pb = proj[id]
+          local pa = projRaster[n.parent]
+          local pb = projRaster[id]
           if pa and pb then
             local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
             gc.color = Color{r=0,g=0,b=0,a=aa}
@@ -2069,8 +2190,9 @@ do
     end
 
     for _,id in ipairs(order) do
-      local p = proj[id]
-      if p then
+      local p = projRaster[id]
+      local pdot = proj[id]
+      if p and pdot then
         local isSel = (selected[id] == true)
         local aa = alphaMap[id] or 255
         if isSel then gc.color = Color{r=60,g=220,b=60,a=255}
@@ -2081,8 +2203,8 @@ do
           drawCirclePolyline(gc, p.x, p.y, p.r, 52)
         end
 
-        local px = math.floor(p.x + 0.5)
-        local py = math.floor(p.y + 0.5)
+        local px = math.floor(pdot.x + 0.5)
+        local py = math.floor(pdot.y + 0.5)
         if isSel then
           gc.color = Color{r=60,g=220,b=60,a=255}
         else
@@ -2200,6 +2322,7 @@ do
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
       dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
       dlg:modify{ id="fov", value=clamp(tonumber(fov_deg) or 60, 15, 140) }
+      dlg:modify{ id="res_scale", value=math.floor(clamp((tonumber(res_scale) or 1.0) * 100, 10, 100) + 0.5) }
 
       updateControlsForState()
       updateControlsFor3D()
@@ -2219,6 +2342,18 @@ do
     visible=false,
     onchange=function()
       fov_deg = clamp(tonumber(dlg.data.fov) or 60, 15, 140)
+      refreshUI()
+    end
+  }
+  dlg:slider{
+    id="res_scale",
+    label="res scale",
+    min=10,
+    max=100,
+    value=100,
+    visible=true,
+    onchange=function()
+      res_scale = clamp((tonumber(dlg.data.res_scale) or 100) / 100.0, 0.1, 1.0)
       refreshUI()
     end
   }
@@ -2800,6 +2935,7 @@ do
   depth_alpha = false
 
   dlg:modify{ id="fov", value=fov_deg, visible=false }
+  dlg:modify{ id="res_scale", value=100, visible=true }
 
   updateControlsForState()
   updateControlsFor3D()
