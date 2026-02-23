@@ -2218,7 +2218,11 @@ do
 
       local dW = {x=dsx, y=dsy, z=0}
       if view3d then
-        local ww = screenDeltaToWorldDelta3(dsx, dsy, drag.baseRootCamZ)
+        local curCamZ = drag.baseRootCamZ
+        if proj and proj[drag.id] and proj[drag.id].camZ then
+          curCamZ = proj[drag.id].camZ
+        end
+        local ww = screenDeltaToWorldDelta3(dsx, dsy, curCamZ)
         dW.x, dW.y, dW.z = ww.x, ww.y, ww.z
       else
         local z2 = math.max(0.0001, view2d.zoom)
@@ -2387,7 +2391,7 @@ do
         if n.parent and effZ and effZ[n.parent] ~= nil then
           parentEff = tonumber(effZ[n.parent]) or 0
         end
-        n.pose_z3d = clamp(desiredEff - parentEff, -400, 400)
+        n.pose_z3d = desiredEff - parentEff
       end
 
       computeActiveLocalsFromWorld()
