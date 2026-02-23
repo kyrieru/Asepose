@@ -671,6 +671,7 @@ do
   local restRangeToParent
   local getFrontSignForRadiusBoost
   local apply2DProximityRadiusBoost
+  local build2DProximityOverlapMap
 
   -- =========================
   -- projection
@@ -680,8 +681,10 @@ do
 
     if not view3d then
       local restWorld = nil
+      local overlapMap = nil
       if statePose then
         restWorld = computeRestWorldPositions()
+        overlapMap = build2DProximityOverlapMap(restWorld)
       end
       for _,id in ipairs(order) do
         local n = nodes[id]
@@ -692,7 +695,7 @@ do
           if statePose then
             r = clamp(base + (base * (ez / 100.0)), 1, 400)
             if n.parent and nodes[n.parent] and restWorld then
-              local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld)
+              local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
               if boosted then r = boosted end
             end
           end
@@ -745,8 +748,10 @@ do
 
     local proj = {}
     local restWorld = nil
+    local overlapMap = nil
     if statePose then
       restWorld = computeRestWorldPositions()
+      overlapMap = build2DProximityOverlapMap(restWorld)
     end
 
     for _,id in ipairs(order) do
@@ -758,7 +763,7 @@ do
         if statePose then
           r = clamp(base + (base * (ez / 100.0)), 1, 400)
           if n.parent and nodes[n.parent] and restWorld then
-            local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld)
+            local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
             if boosted then r = boosted end
           end
         end
@@ -2188,6 +2193,47 @@ do
     return math.sqrt(dx*dx + dy*dy)
   end
 
+
+  build2DProximityOverlapMap = function(restWorld)
+    local out = {}
+    if not restWorld then return out end
+
+    buildChildren()
+
+    local function rec(id, parentEffective)
+      local n = nodes[id]
+      if not n then return end
+
+      local ownOverlap = 0.0
+      if n.parent and nodes[n.parent] then
+        local parentN = nodes[n.parent]
+        local R = restRangeToParent(id, restWorld)
+        if parentN and R and R > 1e-9 then
+          local dxp = (n.worldx or 0) - (parentN.worldx or 0)
+          local dyp = (n.worldy or 0) - (parentN.worldy or 0)
+          local d = math.sqrt(dxp*dxp + dyp*dyp)
+          ownOverlap = clamp(1.0 - (d / R), 0.0, 1.0)
+        end
+      end
+
+      local pe = math.max(0.0, tonumber(parentEffective) or 0.0)
+      -- Parent overlap should amplify child overlap without being hard-clamped
+      -- to [0,1], otherwise hierarchy influence can disappear visually.
+      local effective = ownOverlap * (1.0 + pe)
+
+      out[id] = effective
+      for _,cid in ipairs(n.children or {}) do
+        rec(cid, effective)
+      end
+    end
+
+    for _,rid in ipairs(roots) do
+      rec(rid, 0.0)
+    end
+
+    return out
+  end
+
   getFrontSignForRadiusBoost = function(id)
     if (not view3d) and id and nodes[id] then
       local ns = tonumber(nodes[id].prox_sign_2d) or 1
@@ -2201,22 +2247,26 @@ do
     return (sign >= 0) and 1 or -1
   end
 
-  apply2DProximityRadiusBoost = function(id, n, base, currentR, restWorld)
+  apply2DProximityRadiusBoost = function(id, n, base, currentR, restWorld, overlapMap)
     if not (id and n and base and currentR and restWorld) then return nil end
     local pid = n.parent
     if not (pid and nodes[pid]) then return nil end
 
-    local parentN = nodes[pid]
-    local R = restRangeToParent(id, restWorld)
-    if not parentN or not R or R <= 1e-9 then return nil end
+    local overlap = nil
+    if overlapMap and overlapMap[id] ~= nil then
+      overlap = math.max(0.0, tonumber(overlapMap[id]) or 0.0)
+    else
+      local parentN = nodes[pid]
+      local R = restRangeToParent(id, restWorld)
+      if not parentN or not R or R <= 1e-9 then return nil end
 
-    local dxp = (n.worldx or 0) - (parentN.worldx or 0)
-    local dyp = (n.worldy or 0) - (parentN.worldy or 0)
-    local d = math.sqrt(dxp*dxp + dyp*dyp)
-    if d >= R then return currentR end
+      local dxp = (n.worldx or 0) - (parentN.worldx or 0)
+      local dyp = (n.worldy or 0) - (parentN.worldy or 0)
+      local d = math.sqrt(dxp*dxp + dyp*dyp)
+      if d >= R then return currentR end
 
-    local overlap = 1.0 - (d / R)
-    overlap = clamp(overlap, 0.0, 1.0)
+      overlap = clamp(1.0 - (d / R), 0.0, 1.0)
+    end
     if overlap <= 0 then return currentR end
     if getFrontSignForRadiusBoost(id) <= 0 then return currentR end
 
