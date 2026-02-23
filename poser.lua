@@ -701,6 +701,26 @@ do
     }
   end
 
+  local function screenToWorldAtCamZ(sx, sy, camZ)
+    local f = focalFromFov()
+    local z = camZ or cam_dist
+    if z < 0.001 then z = 0.001 end
+
+    local camX = (sx - cx) * z / f
+    local camY = (sy - cy) * z / f
+    local vec = {
+      x = camR.x * camX + camU.x * camY + camF.x * (z - cam_dist),
+      y = camR.y * camX + camU.y * camY + camF.y * (z - cam_dist),
+      z = camR.z * camX + camU.z * camY + camF.z * (z - cam_dist),
+    }
+
+    return {
+      x = vec.x + cx - pan.x,
+      y = vec.y + cy - pan.y,
+      zpix = vec.z - pan.z,
+    }
+  end
+
   -- =========================
   -- 3D alpha map
   -- =========================
@@ -917,6 +937,7 @@ do
 
     baseLocalZ=0,
     baseRootCamZ=0,
+    baseRootZpix=0,
 
     mmb=false,
     mmb_lastY=0,
@@ -957,6 +978,7 @@ do
     drag.baseWorld = base
     drag.baseLocalZ = getLocalZ(n)
     drag.baseRootCamZ = camZ
+    drag.baseRootZpix = (p and p.zpix) or 0
     drag.depthSign = depth_pref_sign
   end
 
@@ -970,6 +992,7 @@ do
     drag.baseWorld = nil
     drag.baseLocalZ = 0
     drag.baseRootCamZ = 0
+    drag.baseRootZpix = 0
     drag.mmb = false
     drag.depthSign = 0
   end
@@ -2218,11 +2241,7 @@ do
 
       local dW = {x=dsx, y=dsy, z=0}
       if view3d then
-        local curCamZ = drag.baseRootCamZ
-        if proj and proj[drag.id] and proj[drag.id].camZ then
-          curCamZ = proj[drag.id].camZ
-        end
-        local ww = screenDeltaToWorldDelta3(dsx, dsy, curCamZ)
+        local ww = screenDeltaToWorldDelta3(dsx, dsy, drag.baseRootCamZ)
         dW.x, dW.y, dW.z = ww.x, ww.y, ww.z
       else
         local z2 = math.max(0.0001, view2d.zoom)
@@ -2232,6 +2251,11 @@ do
       end
 
       local ids = drag.subtreeIds or { drag.id }
+      local unrestricted3dPose = (view3d and statePose and not (limit_range and n.parent and nodes[n.parent]))
+      local targetRoot = nil
+      if unrestricted3dPose then
+        targetRoot = screenToWorldAtCamZ(target_sx, target_sy, drag.baseRootCamZ)
+      end
 
       local function translateSubtree(dx, dy)
         for _,cid in ipairs(ids) do
@@ -2375,14 +2399,18 @@ do
           translateSubtree(dW.x, dW.y)
         end
       else
-        translateSubtree(dW.x, dW.y)
+        if targetRoot and baseRoot then
+          local dx = targetRoot.x - baseRoot.x
+          local dy = targetRoot.y - baseRoot.y
+          translateSubtree(dx, dy)
+        else
+          translateSubtree(dW.x, dW.y)
+        end
       end
 
-      if view3d and statePose and not (limit_range and n.parent and nodes[n.parent]) then
+      if unrestricted3dPose then
         local baseChild = clamp(tonumber(n.rest_r) or 14, 3, 200)
-        local curEff = (effZ and effZ[drag.id]) and (tonumber(effZ[drag.id]) or 0) or 0
-        local curZpix = baseChild * (curEff / 100.0)
-        local desiredZpix = curZpix + dW.z
+        local desiredZpix = (targetRoot and targetRoot.zpix) or ((drag.baseRootZpix or 0) + dW.z)
         local desiredEff = 0
         if math.abs(baseChild) > 1e-9 then
           desiredEff = (desiredZpix / baseChild) * 100.0
