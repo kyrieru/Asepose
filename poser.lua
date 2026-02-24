@@ -453,6 +453,7 @@ do
 
       sphere = true,
       pinned = false,
+      orient_lock = false,
 
       mirror = nil,
 
@@ -1360,6 +1361,7 @@ do
       nodes[nid].pose_z3d = s.pose_z3d or 0
       nodes[nid].pose_pos_set = (s.pose_pos_set == true)
       nodes[nid].prox_sign_2d = clamp(tonumber(s.prox_sign_2d) or 1, -1, 1)
+      nodes[nid].orient_lock = (s.orient_lock == true)
     end
 
     local desiredW = {}
@@ -1936,8 +1938,10 @@ do
     if not dlg then return end
     if lastSelected and nodes[lastSelected] then
       dlg:modify{ id="sphere_vert", enabled=true, selected=(nodes[lastSelected].sphere ~= false) }
+      dlg:modify{ id="orient_lock", enabled=true, selected=(nodes[lastSelected].orient_lock == true) }
     else
       dlg:modify{ id="sphere_vert", enabled=false, selected=false }
+      dlg:modify{ id="orient_lock", enabled=false, selected=false }
     end
   end
 
@@ -2028,6 +2032,7 @@ do
       data["node_"..i.."_mirror"] = n.mirror or ""
       data["node_"..i.."_sphere"] = (n.sphere ~= false)
       data["node_"..i.."_pinned"] = (n.pinned == true)
+      data["node_"..i.."_orient_lock"] = (n.orient_lock == true)
       data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 1, -1, 1)
     end
 
@@ -2149,6 +2154,7 @@ do
 
         n.sphere = (t["node_"..i.."_sphere"] ~= false)
         n.pinned = (t["node_"..i.."_pinned"] == true)
+        n.orient_lock = (t["node_"..i.."_orient_lock"] == true)
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
         if ps2d == nil then ps2d = 1 end
         n.prox_sign_2d = clamp(ps2d, -1, 1)
@@ -2437,6 +2443,123 @@ do
       end
     end
 
+    local function enforceRightDragOrientationLocks()
+      local baseWorld = drag and drag.ropeBaseWorld
+      if not baseWorld then return end
+
+      local locked = {}
+      for _,id in ipairs(componentIds) do
+        local n = nodes[id]
+        if n and n.parent and nodes[n.parent] and n.orient_lock == true then
+          local cb = baseWorld[id]
+          local pb = baseWorld[n.parent]
+          if cb and pb then
+            locked[#locked+1] = {
+              id=id,
+              parent=n.parent,
+              basePx=pb.x,
+              basePy=pb.y,
+              baseCx=cb.x,
+              baseCy=cb.y,
+            }
+          end
+        end
+      end
+      if #locked == 0 then return end
+
+      -- For locked child edges, parent/child share displacement from drag-start.
+      for _=1,10 do
+        local changed = false
+
+        for _,lk in ipairs(locked) do
+          local c = nodes[lk.id]
+          local p = nodes[lk.parent]
+          if c and p then
+            local dpX = (p.worldx or 0) - lk.basePx
+            local dpY = (p.worldy or 0) - lk.basePy
+            local dcX = (c.worldx or 0) - lk.baseCx
+            local dcY = (c.worldy or 0) - lk.baseCy
+
+            local dX, dY = dpX, dpY
+            if lk.parent == dragId then
+              dX, dY = dpX, dpY
+            elseif lk.id == dragId then
+              dX, dY = dcX, dcY
+            elseif p.pinned == true then
+              dX, dY = dpX, dpY
+            elseif c.pinned == true then
+              dX, dY = dcX, dcY
+            else
+              local mp = dpX*dpX + dpY*dpY
+              local mc = dcX*dcX + dcY*dcY
+              if mc > mp then dX, dY = dcX, dcY end
+            end
+
+            if p.pinned ~= true and lk.parent ~= dragId then
+              local tx = lk.basePx + dX
+              local ty = lk.basePy + dY
+              if math.abs((p.worldx or 0) - tx) > 1e-6 or math.abs((p.worldy or 0) - ty) > 1e-6 then
+                p.worldx, p.worldy = tx, ty
+                changed = true
+              end
+            end
+
+            if c.pinned ~= true and lk.id ~= dragId then
+              local tx = lk.baseCx + dX
+              local ty = lk.baseCy + dY
+              if math.abs((c.worldx or 0) - tx) > 1e-6 or math.abs((c.worldy or 0) - ty) > 1e-6 then
+                c.worldx, c.worldy = tx, ty
+                changed = true
+              end
+            end
+          end
+        end
+
+        if not changed then break end
+      end
+
+      -- Let non-locked parts continue to resolve as rope/chain after lock translation.
+      for _=1,8 do
+        local changed = false
+        for _,e in ipairs(edges) do
+          local a = nodes[e.a]
+          local b = nodes[e.b]
+          if a and b then
+            local ax, ay = a.worldx or 0, a.worldy or 0
+            local bx, by = b.worldx or 0, b.worldy or 0
+            local dx = bx - ax
+            local dy = by - ay
+            local d2 = dx*dx + dy*dy
+            local maxLen2 = e.maxLen * e.maxLen
+            if d2 > maxLen2 then
+              local d = math.sqrt(d2)
+              if d > 1e-9 then
+                local excess = (d - e.maxLen)
+                local ux, uy = dx / d, dy / d
+                local aLocked = (a.pinned == true) or ((not hasPinned) and (e.a == dragId))
+                local bLocked = (b.pinned == true) or ((not hasPinned) and (e.b == dragId))
+                if not aLocked and not bLocked then
+                  local half = excess * 0.5
+                  a.worldx = ax + ux * half
+                  a.worldy = ay + uy * half
+                  b.worldx = bx - ux * half
+                  b.worldy = by - uy * half
+                elseif aLocked and not bLocked then
+                  b.worldx = bx - ux * excess
+                  b.worldy = by - uy * excess
+                elseif (not aLocked) and bLocked then
+                  a.worldx = ax + ux * excess
+                  a.worldy = ay + uy * excess
+                end
+                changed = true
+              end
+            end
+          end
+        end
+        if not changed then break end
+      end
+    end
+
     if not hasPinned then
       local draggedFinal = nodes[dragId]
       if draggedFinal then
@@ -2444,6 +2567,8 @@ do
         draggedFinal.worldy = targetY
       end
     end
+
+    enforceRightDragOrientationLocks()
   end
   local function applyPinnedRopeConstraints(anchorId, restWorld)
     if not (anchorId and nodes[anchorId]) then return end
@@ -3591,6 +3716,20 @@ do
     onclick=function()
       limit_range = (dlg.data.limit_range == true)
       refreshUI()
+    end
+  }
+  dlg:check{
+    id="orient_lock",
+    text="retain orientation",
+    selected=false,
+    enabled=false,
+    onclick=function()
+      if lastSelected and nodes[lastSelected] then
+        nodes[lastSelected].orient_lock = (dlg.data.orient_lock == true)
+        refreshUI()
+      else
+        updateSphereUI(dlg)
+      end
     end
   }
   dlg:check{
