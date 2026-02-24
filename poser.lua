@@ -672,7 +672,7 @@ do
   -- forward declarations (range helpers)
   local computeRestWorldPositions
   local restRangeToParent
-  local getFrontSignForRadiusBoost
+  local getDepthBias2D
   local apply2DProximityRadiusBoost
   local build2DProximityOverlapMap
 
@@ -995,7 +995,7 @@ do
   -- =========================
   -- drag state
   -- =========================
-  local depth_pref_sign = 1
+  local depth_pref_bias = 1
   local depth_pref_set = false
 
   local drag = {
@@ -1016,7 +1016,7 @@ do
     mmb=false,
     mmb_lastY=0,
 
-    depthSign=0,
+    depthBias=0,
     right=false,
     startMx=0,
     startMy=0,
@@ -1092,10 +1092,10 @@ do
       drag.baseSubtreeZpix = subtreeZpix
     end
     if view3d then
-      drag.depthSign = (depth_pref_set and depth_pref_sign or 1)
+      drag.depthBias = clamp(tonumber(depth_pref_bias) or 1, -1, 1)
     else
       local ns = (nodes[id] and tonumber(nodes[id].prox_sign_2d)) or 1
-      drag.depthSign = (ns >= 0) and 1 or -1
+      drag.depthBias = clamp(ns, -1, 1)
     end
     drag.right = (isRightDrag == true)
     drag.startMx = mx
@@ -1118,7 +1118,7 @@ do
     drag.baseEffZ = nil
     drag.baseSubtreeZpix = nil
     drag.mmb = false
-    drag.depthSign = 0
+    drag.depthBias = 0
     drag.right = false
     drag.startMx = 0
     drag.startMy = 0
@@ -1348,7 +1348,7 @@ do
       nodes[nid].pose_z2d = s.pose_z2d or 0
       nodes[nid].pose_z3d = s.pose_z3d or 0
       nodes[nid].pose_pos_set = (s.pose_pos_set == true)
-      nodes[nid].prox_sign_2d = ((tonumber(s.prox_sign_2d) or 1) >= 0) and 1 or -1
+      nodes[nid].prox_sign_2d = clamp(tonumber(s.prox_sign_2d) or 1, -1, 1)
     end
 
     local desiredW = {}
@@ -1991,7 +1991,8 @@ do
     data["view2d_panx"] = view2d.panx
     data["view2d_pany"] = view2d.pany
 
-    data["depth_pref_sign"] = depth_pref_sign
+    data["depth_pref_bias"] = depth_pref_bias
+    data["depth_pref_sign"] = depth_pref_bias
     data["depth_pref_set"] = (depth_pref_set == true)
 
     for i,id in ipairs(order) do
@@ -2016,7 +2017,7 @@ do
       data["node_"..i.."_mirror"] = n.mirror or ""
       data["node_"..i.."_sphere"] = (n.sphere ~= false)
       data["node_"..i.."_pinned"] = (n.pinned == true)
-      data["node_"..i.."_prox_sign_2d"] = ((tonumber(n.prox_sign_2d) or 1) >= 0) and 1 or -1
+      data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 1, -1, 1)
     end
 
     local linkKeys = {}
@@ -2084,8 +2085,7 @@ do
     view2d.panx = tonumber(t.view2d_panx) or 0.0
     view2d.pany = tonumber(t.view2d_pany) or 0.0
 
-    depth_pref_sign = tonumber(t.depth_pref_sign) or 1
-    if depth_pref_sign >= 0 then depth_pref_sign = 1 else depth_pref_sign = -1 end
+    depth_pref_bias = clamp(tonumber(t.depth_pref_bias) or tonumber(t.depth_pref_sign) or 1, -1, 1)
     depth_pref_set = (t.depth_pref_set == true)
 
     local ncount = tonumber(t.node_count) or 0
@@ -2140,7 +2140,7 @@ do
         n.pinned = (t["node_"..i.."_pinned"] == true)
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
         if ps2d == nil then ps2d = 1 end
-        n.prox_sign_2d = (ps2d >= 0) and 1 or -1
+        n.prox_sign_2d = clamp(ps2d, -1, 1)
       end
     end
 
@@ -2574,10 +2574,8 @@ do
         end
       end
 
-      local pe = math.max(0.0, tonumber(parentEffective) or 0.0)
-      -- Parent overlap should amplify child overlap without being hard-clamped
-      -- to [0,1], otherwise hierarchy influence can disappear visually.
-      local effective = ownOverlap * (1.0 + pe)
+      local pe = tonumber(parentEffective) or 0.0
+      local effective = pe + (ownOverlap * getDepthBias2D(id))
 
       out[id] = effective
       for _,cid in ipairs(n.children or {}) do
@@ -2592,17 +2590,17 @@ do
     return out
   end
 
-  getFrontSignForRadiusBoost = function(id)
-    if (not view3d) and id and nodes[id] then
-      local ns = tonumber(nodes[id].prox_sign_2d) or 1
-      return (ns >= 0) and 1 or -1
+  getDepthBias2D = function(id)
+    if id and nodes[id] then
+      return clamp(tonumber(nodes[id].prox_sign_2d) or 1, -1, 1)
     end
-
-    local sign = depth_pref_set and depth_pref_sign or 1
-    if drag and drag.active and drag.depthSign and drag.depthSign ~= 0 then
-      sign = drag.depthSign
+    if drag and drag.active then
+      return clamp(tonumber(drag.depthBias) or 0, -1, 1)
     end
-    return (sign >= 0) and 1 or -1
+    if depth_pref_set then
+      return clamp(tonumber(depth_pref_bias) or 1, -1, 1)
+    end
+    return 1
   end
 
   apply2DProximityRadiusBoost = function(id, n, base, currentR, restWorld, overlapMap)
@@ -2612,7 +2610,7 @@ do
 
     local overlap = nil
     if overlapMap and overlapMap[id] ~= nil then
-      overlap = math.max(0.0, tonumber(overlapMap[id]) or 0.0)
+      overlap = tonumber(overlapMap[id]) or 0.0
     else
       local parentN = nodes[pid]
       local R = restRangeToParent(id, restWorld)
@@ -2623,15 +2621,12 @@ do
       local d = math.sqrt(dxp*dxp + dyp*dyp)
       if d >= R then return currentR end
 
-      overlap = clamp(1.0 - (d / R), 0.0, 1.0)
+      overlap = clamp(1.0 - (d / R), 0.0, 1.0) * getDepthBias2D(id)
     end
-    if overlap <= 0 then return currentR end
-    if getFrontSignForRadiusBoost(id) <= 0 then return currentR end
 
     local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
     local proximityBoost = base * (overlap * fovMul)
 
-    -- only increase final display radius, never decrease
     return currentR + proximityBoost
   end
 
@@ -2652,10 +2647,10 @@ do
         local r = base
         if statePose then
           local ez = (effZ and (tonumber(effZ[id]) or 0)) or 0
-          r = clamp(base + (base * (ez / 100.0)), 1, 400)
+          r = clamp(math.max(base, base + (base * (ez / 100.0))), 1, 400)
           if n.parent and nodes[n.parent] and restWorld then
             local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
-            if boosted then r = boosted end
+            if boosted then r = math.max(base, boosted) end
           end
         end
         radii[id] = { base = base, r = r }
@@ -3074,14 +3069,22 @@ do
 
       if drag.active and drag.id then
         if statePose then
-          local sign = (dy > 0) and -1 or 1
-          drag.depthSign = sign
+          local step = 0.1
+          local deltaBias = (dy > 0) and -step or step
           if view3d then
-            depth_pref_sign = sign
+            local cur = clamp(tonumber(depth_pref_bias) or 1, -1, 1)
+            local b = clamp(cur + deltaBias, -1, 1)
+            depth_pref_bias = b
             depth_pref_set = true
+            drag.depthBias = b
           else
             local dn = nodes[drag.id]
-            if dn then dn.prox_sign_2d = sign end
+            if dn then
+              local cur = clamp(tonumber(dn.prox_sign_2d) or 1, -1, 1)
+              local b = clamp(cur + deltaBias, -1, 1)
+              dn.prox_sign_2d = b
+              drag.depthBias = b
+            end
           end
           refreshUI()
         end
@@ -3302,12 +3305,8 @@ do
                   local t1 = (-b + sd) * inv
                   if t0 > t1 then t0, t1 = t1, t0 end
                   if t1 > 0 then
-                    local sign = drag.depthSign
-                    if sign == 0 then
-                      local childCamZ = proj[drag.id] and (proj[drag.id].camZ or parentCamZ) or parentCamZ
-                      sign = (childCamZ > parentCamZ) and 1 or -1
-                    end
-                    if sign >= 0 then sign = 1 else sign = -1 end
+                    local bias = clamp(tonumber(drag.depthBias) or 0, -1, 1)
+                    local sign = (bias >= 0) and 1 or -1
                     local t = (sign < 0) and t0 or t1
                     if t <= 0 then t = t1 end
                     local hit = {x=D.x*t, y=D.y*t, z=D.z*t}
@@ -3325,9 +3324,8 @@ do
                 local depthMax = math.sqrt(rem2)
                 local overlap = 1.0 - (dPlane / R)
                 overlap = clamp(overlap, 0.0, 1.0)
-                local sign = (drag.depthSign ~= 0) and drag.depthSign or depth_pref_sign
-                if sign >= 0 then sign = 1 else sign = -1 end
-                depthCam = sign * depthMax * overlap
+                local bias = clamp((drag.depthBias ~= 0) and drag.depthBias or depth_pref_bias, -1, 1)
+                depthCam = bias * depthMax * overlap
               end
 
               local offW = {
@@ -3604,7 +3602,7 @@ do
   dlg:modify{ id="depth_alpha", selected=false }
   depth_alpha = false
 
-  depth_pref_sign = 1
+  depth_pref_bias = 1
   depth_pref_set = false
 
   dlg:modify{ id="fov", value=fov_deg, visible=false }
