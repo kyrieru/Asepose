@@ -2383,6 +2383,65 @@ do
       dragged.worldy = targetY
     end
   end
+  local function applyPinnedRopeConstraints(anchorId, restWorld)
+    if not (anchorId and nodes[anchorId]) then return end
+    local componentIds = listComponentNodesFrom(anchorId)
+    if #componentIds == 0 then return end
+
+    local edges = {}
+    local hasPinned = false
+    for _,id in ipairs(componentIds) do
+      local n = nodes[id]
+      if n and n.pinned == true then hasPinned = true end
+      if n and n.parent and nodes[n.parent] then
+        local maxLen = restRangeToParent(id, restWorld)
+        if maxLen and maxLen > 1e-6 then
+          edges[#edges+1] = { a=n.parent, b=id, maxLen=maxLen }
+        end
+      end
+    end
+    if (not hasPinned) or (#edges == 0) then return end
+
+    for _=1,28 do
+      local changed = false
+      for _,e in ipairs(edges) do
+        local a = nodes[e.a]
+        local b = nodes[e.b]
+        if a and b then
+          local ax, ay = a.worldx or 0, a.worldy or 0
+          local bx, by = b.worldx or 0, b.worldy or 0
+          local dx = bx - ax
+          local dy = by - ay
+          local d2 = dx*dx + dy*dy
+          local maxLen2 = e.maxLen * e.maxLen
+          if d2 > maxLen2 then
+            local d = math.sqrt(d2)
+            if d > 1e-9 then
+              local excess = d - e.maxLen
+              local ux, uy = dx / d, dy / d
+              local aLocked = (a.pinned == true)
+              local bLocked = (b.pinned == true)
+              if not aLocked and not bLocked then
+                local half = excess * 0.5
+                a.worldx, a.worldy = ax + ux*half, ay + uy*half
+                b.worldx, b.worldy = bx - ux*half, by - uy*half
+                changed = true
+              elseif aLocked and not bLocked then
+                b.worldx, b.worldy = bx - ux*excess, by - uy*excess
+                changed = true
+              elseif (not aLocked) and bLocked then
+                a.worldx, a.worldy = ax + ux*excess, ay + uy*excess
+                changed = true
+              end
+            end
+          end
+        end
+      end
+      if not changed then break end
+    end
+  end
+
+
 
 
   build2DProximityOverlapMap = function(restWorld)
@@ -3137,6 +3196,11 @@ do
             translateSubtree(dx, dy)
           end
         end
+      end
+
+      if (not view3d) and (not drag.right) then
+        local restWorldPinned = computeRestWorldPositions()
+        applyPinnedRopeConstraints(drag.id, restWorldPinned)
       end
 
       if unrestricted3dPose then
