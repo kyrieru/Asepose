@@ -41,6 +41,9 @@
 --   - Parent: last selected becomes parent of all other selected verts. (REST only)
 --   - Mirror: duplicates last selected vert AND its subtree across pad center X. (REST only)
 --   - Delete: deletes selected verts but keeps their children (children become roots). (REST only)
+--   - Add Deform: with 2 selected, inserts midpoint deform between ancestor/descendant.
+--                 with 1 selected (that has a parent), inserts deform beyond the selected
+--                 using the selected->parent angle/distance.
 --   - Revert: (POSE only) resets selected verts pose position to rest position and sets pose Zs to 0.
 --   - Revert All: (POSE only) resets ALL verts pose position to rest position and sets pose Zs to 0.
 --
@@ -473,6 +476,9 @@ do
     return id
   end
 
+  local DEFORM_U_MIN = 0.0
+  local DEFORM_U_MAX =  4.0
+
   local function isDeformNode(n)
     return n and (n.is_deform == true) and n.deform_parent and n.deform_descendant
       and nodes[n.deform_parent] and nodes[n.deform_descendant]
@@ -662,7 +668,7 @@ do
           local pb = nodes[n.deform_descendant]
           local ax, ay = pa.worldx or 0, pa.worldy or 0
           local bx, by = pb.worldx or 0, pb.worldy or 0
-          local ux = clamp(tonumber(n.deform_u) or 0.5, 0, 1)
+          local ux = clamp(tonumber(n.deform_u) or 0.5, DEFORM_U_MIN, DEFORM_U_MAX)
           local vx = tonumber(n.deform_v) or 0
           local dx = bx - ax
           local dy = by - ay
@@ -707,7 +713,7 @@ do
             local len2 = dx*dx + dy*dy
             if len2 > 1e-9 then
               local t = ((px-ax)*dx + (py-ay)*dy) / len2
-              n.deform_u = clamp(t, 0, 1)
+              n.deform_u = clamp(t, DEFORM_U_MIN, DEFORM_U_MAX)
               local len = math.sqrt(len2)
               n.deform_v = (((px-ax) * (-dy)) + ((py-ay) * dx)) / len
             else
@@ -1390,37 +1396,49 @@ do
 
   local function createDeformBetweenSelected()
     if not stateRest then return end
-    if selectionCount() ~= 2 then return end
+
+    local count = selectionCount()
+    if count ~= 1 and count ~= 2 then return end
+
+    local parentId = nil
+    local descendantId = nil
+
+    if count == 1 then
+      descendantId = selectedList[1]
+      if not (descendantId and nodes[descendantId]) then return end
+      parentId = nodes[descendantId].parent
+      if not (parentId and nodes[parentId]) then return end
+    end
 
     local a = selectedList[1]
     local b = selectedList[2]
-    if not (a and b and nodes[a] and nodes[b]) then return end
+    if count == 2 and not (a and b and nodes[a] and nodes[b]) then return end
 
     computeWorldFromActiveLocals()
     buildChildren()
 
-    local descendant = nil
-    local cur = nodes[b]
-    while cur and cur.parent do
-      if cur.parent == a then descendant = b break end
-      cur = nodes[cur.parent]
-    end
-    if not descendant then
-      cur = nodes[a]
+    if count == 2 then
+      local descendant = nil
+      local cur = nodes[b]
       while cur and cur.parent do
-        if cur.parent == b then descendant = a break end
+        if cur.parent == a then descendant = b break end
         cur = nodes[cur.parent]
       end
-    end
+      if not descendant then
+        cur = nodes[a]
+        while cur and cur.parent do
+          if cur.parent == b then descendant = a break end
+          cur = nodes[cur.parent]
+        end
+      end
 
-    local parentId = nil
-    local descendantId = nil
-    if descendant == b then
-      parentId, descendantId = a, b
-    elseif descendant == a then
-      parentId, descendantId = b, a
-    else
-      parentId, descendantId = a, b
+      if descendant == b then
+        parentId, descendantId = a, b
+      elseif descendant == a then
+        parentId, descendantId = b, a
+      else
+        parentId, descendantId = a, b
+      end
     end
 
     local pa = nodes[parentId]
@@ -1433,7 +1451,7 @@ do
     n.is_deform = true
     n.deform_parent = parentId
     n.deform_descendant = descendantId
-    n.deform_u = 0.5
+    n.deform_u = (count == 1) and 2.0 or 0.5
     n.deform_v = 0
 
     local wx = ax + (bx - ax) * n.deform_u
@@ -1454,6 +1472,22 @@ do
     computeWorldFromActiveLocals()
     computeActiveLocalsFromWorld()
     computeWorldFromActiveLocals()
+  end
+
+  local function canCreateDeformFromSelection()
+    if not stateRest then return false end
+
+    local count = selectionCount()
+    if count == 2 then
+      local a = selectedList[1]
+      local b = selectedList[2]
+      return (a and b and nodes[a] and nodes[b]) and true or false
+    elseif count == 1 then
+      local id = selectedList[1]
+      return (id and nodes[id] and nodes[id].parent and nodes[nodes[id].parent]) and true or false
+    end
+
+    return false
   end
 
   local function doParent()
@@ -1536,7 +1570,7 @@ do
       nodes[nid].sphere_rot = (s.sphere_rot == true)
       nodes[nid].orient_lock = (s.orient_lock == true)
       nodes[nid].is_deform = (s.is_deform == true)
-      nodes[nid].deform_u = clamp(tonumber(s.deform_u) or 0.5, 0, 1)
+      nodes[nid].deform_u = clamp(tonumber(s.deform_u) or 0.5, DEFORM_U_MIN, DEFORM_U_MAX)
       nodes[nid].deform_v = tonumber(s.deform_v) or 0
       nodes[nid].deform_parent = (s.deform_parent and map[s.deform_parent]) or s.deform_parent
       nodes[nid].deform_descendant = (s.deform_descendant and map[s.deform_descendant]) or s.deform_descendant
@@ -2567,7 +2601,7 @@ do
         local dd = tostring(t["node_"..i.."_deform_descendant"] or "")
         n.deform_parent = (dp ~= "") and dp or nil
         n.deform_descendant = (dd ~= "") and dd or nil
-        n.deform_u = clamp(tonumber(t["node_"..i.."_deform_u"]) or 0.5, 0, 1)
+        n.deform_u = clamp(tonumber(t["node_"..i.."_deform_u"]) or 0.5, DEFORM_U_MIN, DEFORM_U_MAX)
         n.deform_v = tonumber(t["node_"..i.."_deform_v"]) or 0
       end
     end
@@ -3199,7 +3233,7 @@ do
           local ez = (effZ and (tonumber(effZ[id]) or 0)) or 0
           if isDeformNode(n) then
             local dn = nodes[n.deform_descendant]
-            local du = clamp(tonumber(n.deform_u) or 0.5, 0, 1)
+            local du = clamp(tonumber(n.deform_u) or 0.5, DEFORM_U_MIN, DEFORM_U_MAX)
             local dbase = clamp(tonumber((dn and dn.rest_r) or base) or base, R_MIN, R_MAX)
             local dz = (effZ and dn and (tonumber(effZ[dn.id]) or 0)) or 0
             local dr = clamp(math.max(dbase, dbase + (dbase * (dz / 100.0))), 1, 400)
@@ -3438,7 +3472,7 @@ do
       dlg:modify{ id="btn_parent", visible=isRest }
       dlg:modify{ id="btn_mirror", visible=isRest }
       dlg:modify{ id="btn_delete", visible=isRest }
-      dlg:modify{ id="btn_add_deform", visible=isRest, enabled=(selectionCount() == 2) }
+      dlg:modify{ id="btn_add_deform", visible=isRest, enabled=canCreateDeformFromSelection() }
       dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
       dlg:modify{ id="btn_revert_all", visible=(not isRest) }
@@ -3448,7 +3482,7 @@ do
 
   local function updateDeformButtonUI()
     pcall(function()
-      dlg:modify{ id="btn_add_deform", enabled=(stateRest and selectionCount() == 2), visible=stateRest }
+      dlg:modify{ id="btn_add_deform", enabled=canCreateDeformFromSelection(), visible=stateRest }
     end)
   end
 
