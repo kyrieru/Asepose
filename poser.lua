@@ -2328,9 +2328,6 @@ do
       end
     end
 
-    -- For max-only constraints there are infinitely many valid solutions. When the
-    -- chain is near taut, bias to a straight rope toward the target to avoid orbiting
-    -- (elbow/shoulder arcing "around" while pulling outward).
     local totalLen = 0
     for i=1,n-1 do totalLen = totalLen + (limits[i] or 0) end
     local dxrt = targetX - rootFixed.x
@@ -2359,7 +2356,6 @@ do
     local ey = pts[n].y - targetY
     return math.sqrt(ex*ex + ey*ey)
   end
-
 
   local function applyPinnedDescendantIK(movedRootId, movedIds, restWorld)
     if not (movedRootId and nodes[movedRootId] and movedIds) then return end
@@ -2413,8 +2409,6 @@ do
       local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
       moveSubtreeByDelta(rootId, ux*rem, uy*rem, true, nil)
 
-      -- Keep parent linkage coherent without recursive ancestor chasing; recursive
-      -- propagation here can feed back with the drag target and cause body spin.
       local childN = nodes[rootId]
       if childN then
         local pid = childN.parent
@@ -2428,8 +2422,6 @@ do
               local d = math.sqrt(vx*vx + vy*vy)
               if d > R + 1e-6 and d > 1e-9 then
                 local step = d - R
-                -- Move parent-side hierarchy, but do not re-translate the actively
-                -- dragged chain itself; this avoids feedback loops/spin around hand.
                 moveSubtreeByDelta(pid, (vx/d)*step, (vy/d)*step, true, chainSet)
               end
             end
@@ -2441,7 +2433,48 @@ do
     end
   end
 
+  -- NEW: when right-dragging (limit range, 2D), also enforce max-distance constraints
+  -- down the hierarchy so descendants get the same IK-like effect as ancestors.
+  local function pullDescendantsFromDragged(dragId, restWorld)
+    if not (dragId and nodes[dragId] and restWorld) then return end
+    buildChildren()
 
+    local function clampChildToParent(pid, cid)
+      local pn = nodes[pid]
+      local cn = nodes[cid]
+      if not pn or not cn then return end
+
+      local R = restRangeToParent(cid, restWorld)
+      if not R or R <= 1e-9 then return end
+
+      local dx = (cn.worldx or 0) - (pn.worldx or 0)
+      local dy = (cn.worldy or 0) - (pn.worldy or 0)
+      local d = math.sqrt(dx*dx + dy*dy)
+
+      if d > R + 1e-6 and d > 1e-9 then
+        if cn.pinned == true then
+          return
+        end
+        local s = R / d
+        local newX = (pn.worldx or 0) + dx * s
+        local newY = (pn.worldy or 0) + dy * s
+        local ddx = newX - (cn.worldx or 0)
+        local ddy = newY - (cn.worldy or 0)
+        moveSubtreeByDelta(cid, ddx, ddy, true, nil)
+      end
+    end
+
+    local function rec(pid)
+      local pn = nodes[pid]
+      if not pn then return end
+      for _,cid in ipairs(pn.children or {}) do
+        clampChildToParent(pid, cid)
+        rec(cid)
+      end
+    end
+
+    rec(dragId)
+  end
 
   build2DProximityOverlapMap = function(restWorld)
     local out = {}
@@ -2466,8 +2499,6 @@ do
       end
 
       local pe = math.max(0.0, tonumber(parentEffective) or 0.0)
-      -- Parent overlap should amplify child overlap without being hard-clamped
-      -- to [0,1], otherwise hierarchy influence can disappear visually.
       local effective = ownOverlap * (1.0 + pe)
 
       out[id] = effective
@@ -2522,7 +2553,6 @@ do
     local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
     local proximityBoost = base * (overlap * fovMul)
 
-    -- only increase final display radius, never decrease
     return currentR + proximityBoost
   end
 
@@ -3023,7 +3053,15 @@ do
         dW.z = 0
       end
 
-      local ids = drag.subtreeIds or { drag.id }
+      -- NOTE: drag.subtreeIds remains the full subtree for other systems (pinned scan, etc.)
+      -- For RIGHT-drag IK, we only move the dragged vert directly (not the whole subtree),
+      -- then solve constraints both upward (ancestors) and downward (descendants).
+      local idsAll = drag.subtreeIds or { drag.id }
+      local idsMove = idsAll
+      if (drag.right and limit_range and (not view3d)) then
+        idsMove = { drag.id }
+      end
+
       local unrestricted3dPose = (view3d and statePose and not (limit_range and n.parent and nodes[n.parent]))
       local targetRoot = nil
       if unrestricted3dPose then
@@ -3031,7 +3069,7 @@ do
       end
 
       local function translateSubtree(dx, dy)
-        for _,cid in ipairs(ids) do
+        for _,cid in ipairs(idsMove) do
           local b = base[cid]
           local nn = nodes[cid]
           if b and nn then
@@ -3155,23 +3193,46 @@ do
                   newRootY = (parentN.worldy or 0) + dyp*s
                 end
               end
+
               local dx = newRootX - baseRoot.x
               local dy = newRootY - baseRoot.y
+
               translateSubtree(dx, dy)
+
               if (not view3d) and drag.right then
-                pullAncestorChainForDragged(drag.id, ids, restWorld)
+                -- NEW: Right-drag constraint solves in BOTH directions
+                -- (ancestors already done; add descendants)
+                pullAncestorChainForDragged(drag.id, idsAll, restWorld)
+                pullDescendantsFromDragged(drag.id, restWorld)
               end
-              if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
+
+              if not view3d then
+                applyPinnedDescendantIK(drag.id, idsAll, restWorld)
+              end
             else
               local dx, dy = dW.x, dW.y
               translateSubtree(dx, dy)
-              if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld) end
-              if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
+              if (not view3d) and drag.right then
+                local restWorld2 = computeRestWorldPositions()
+                pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
+                pullDescendantsFromDragged(drag.id, restWorld2)
+              end
+              if not view3d then
+                local restWorld2 = computeRestWorldPositions()
+                applyPinnedDescendantIK(drag.id, idsAll, restWorld2)
+              end
             end
           end
         else
           translateSubtree(dW.x, dW.y)
-          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld) end
+          if not view3d then
+            local restWorld2 = computeRestWorldPositions()
+            if drag.right then
+              pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
+              pullDescendantsFromDragged(drag.id, restWorld2)
+            end
+            applyPinnedDescendantIK(drag.id, idsAll, restWorld2)
+          end
         end
       else
         if targetRoot and baseRoot then
@@ -3179,14 +3240,20 @@ do
           local dy = targetRoot.y - baseRoot.y
           translateSubtree(dx, dy)
           local restWorld2 = computeRestWorldPositions()
-          if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld2) end
-          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld2) end
+          if (not view3d) and drag.right then
+            pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
+            pullDescendantsFromDragged(drag.id, restWorld2)
+          end
+          if not view3d then applyPinnedDescendantIK(drag.id, idsAll, restWorld2) end
         else
           local dx, dy = dW.x, dW.y
           translateSubtree(dx, dy)
           local restWorld2 = computeRestWorldPositions()
-          if (not view3d) and drag.right then pullAncestorChainForDragged(drag.id, ids, restWorld2) end
-          if not view3d then applyPinnedDescendantIK(drag.id, ids, restWorld2) end
+          if (not view3d) and drag.right then
+            pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
+            pullDescendantsFromDragged(drag.id, restWorld2)
+          end
+          if not view3d then applyPinnedDescendantIK(drag.id, idsAll, restWorld2) end
         end
       end
 
