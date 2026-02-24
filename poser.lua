@@ -1023,7 +1023,6 @@ do
     subtreeIds=nil,
     baseWorld=nil,
     ropeComponentIds=nil,
-    ropeBaseWorld=nil,
 
     baseLocalZ=0,
     baseRootCamZ=0,
@@ -1078,7 +1077,6 @@ do
     drag.baseEffZ = nil
     drag.baseSubtreeZpix = nil
     drag.ropeComponentIds = nil
-    drag.ropeBaseWorld = nil
 
     if isRightDrag and (not view3d) then
       local comp, seen = {}, {}
@@ -1097,14 +1095,7 @@ do
           end
         end
       end
-
-      local compBase = {}
-      for _,cid in ipairs(comp) do
-        local nn = nodes[cid]
-        if nn then compBase[cid] = { x = nn.worldx or 0, y = nn.worldy or 0 } end
-      end
       drag.ropeComponentIds = comp
-      drag.ropeBaseWorld = compBase
     end
 
     if statePose and view3d then
@@ -1138,7 +1129,6 @@ do
     drag.subtreeIds = nil
     drag.baseWorld = nil
     drag.ropeComponentIds = nil
-    drag.ropeBaseWorld = nil
     drag.baseLocalZ = 0
     drag.baseRootCamZ = 0
     drag.baseRootZpix = 0
@@ -2294,10 +2284,7 @@ do
     end
 
 
-    local solverIterations = 30
-    local tautness = 0.9
-    local holdToStart = 0.045
-    local baseHold = drag.ropeBaseWorld
+    local solverIterations = 40
 
     for _=1,solverIterations do
       local dragged = nodes[dragId]
@@ -2320,7 +2307,7 @@ do
           if d2 > maxLen2 then
             local d = math.sqrt(d2)
             if d > 1e-9 then
-              local excess = (d - e.maxLen) * tautness
+              local excess = (d - e.maxLen)
               local ux, uy = dx / d, dy / d
 
               local aLocked = (e.a == dragId) or (a.pinned == true)
@@ -2343,19 +2330,51 @@ do
           end
         end
       end
-      if baseHold then
-        for _,cid in ipairs(componentIds) do
-          if cid ~= dragId then
-            local nn = nodes[cid]
-            local bb = baseHold[cid]
-            if nn and bb and nn.pinned ~= true then
-              nn.worldx = (nn.worldx or 0) + (bb.x - (nn.worldx or 0)) * holdToStart
-              nn.worldy = (nn.worldy or 0) + (bb.y - (nn.worldy or 0)) * holdToStart
+    end
+
+    for _=1,4 do
+      local changed = false
+      for _,e in ipairs(edges) do
+        local a = nodes[e.a]
+        local b = nodes[e.b]
+        if a and b then
+          local ax, ay = a.worldx or 0, a.worldy or 0
+          local bx, by = b.worldx or 0, b.worldy or 0
+          local dx = bx - ax
+          local dy = by - ay
+          local d2 = dx*dx + dy*dy
+          local maxLen2 = e.maxLen * e.maxLen
+          if d2 > maxLen2 then
+            local d = math.sqrt(d2)
+            if d > 1e-9 then
+              local excess = (d - e.maxLen)
+              local ux, uy = dx / d, dy / d
+              local aLocked = (e.a == dragId) or (a.pinned == true)
+              local bLocked = (e.b == dragId) or (b.pinned == true)
+              if not aLocked and not bLocked then
+                local half = excess * 0.5
+                a.worldx = ax + ux * half
+                a.worldy = ay + uy * half
+                b.worldx = bx - ux * half
+                b.worldy = by - uy * half
+              elseif aLocked and not bLocked then
+                b.worldx = bx - ux * excess
+                b.worldy = by - uy * excess
+              elseif (not aLocked) and bLocked then
+                a.worldx = ax + ux * excess
+                a.worldy = ay + uy * excess
+              end
+              changed = true
             end
           end
         end
       end
-
+      local draggedNow = nodes[dragId]
+      if draggedNow then
+        draggedNow.worldx = targetX
+        draggedNow.worldy = targetY
+      end
+      if not changed then break end
     end
 
     local dragged = nodes[dragId]
@@ -3068,7 +3087,7 @@ do
             if parentN then
               local newRootX = baseRoot.x + dW.x
               local newRootY = baseRoot.y + dW.y
-              if not drag.right then
+              if not ((not view3d) and drag.right) then
                 local dxp = newRootX - (parentN.worldx or 0)
                 local dyp = newRootY - (parentN.worldy or 0)
                 local dd = math.sqrt(dxp*dxp + dyp*dyp)
