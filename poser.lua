@@ -2273,8 +2273,10 @@ do
     if #componentIds == 0 then return end
 
     local edges = {}
+    local hasPinned = false
     for _,id in ipairs(componentIds) do
       local n = nodes[id]
+      if n and n.pinned == true then hasPinned = true end
       if n and n.parent and nodes[n.parent] then
         local maxLen = restRangeToParent(id, restWorld)
         if maxLen and maxLen > 1e-6 then
@@ -2286,11 +2288,19 @@ do
 
     local solverIterations = 40
 
+    local draggedStart = nodes[dragId]
+    if draggedStart then
+      draggedStart.worldx = targetX
+      draggedStart.worldy = targetY
+    end
+
     for _=1,solverIterations do
-      local dragged = nodes[dragId]
-      if dragged then
-        dragged.worldx = targetX
-        dragged.worldy = targetY
+      if not hasPinned then
+        local draggedNow = nodes[dragId]
+        if draggedNow then
+          draggedNow.worldx = targetX
+          draggedNow.worldy = targetY
+        end
       end
 
       for _,e in ipairs(edges) do
@@ -2310,8 +2320,8 @@ do
               local excess = (d - e.maxLen)
               local ux, uy = dx / d, dy / d
 
-              local aLocked = (e.a == dragId) or (a.pinned == true)
-              local bLocked = (e.b == dragId) or (b.pinned == true)
+              local aLocked = (a.pinned == true) or ((not hasPinned) and (e.a == dragId))
+              local bLocked = (b.pinned == true) or ((not hasPinned) and (e.b == dragId))
 
               if not aLocked and not bLocked then
                 local half = excess * 0.5
@@ -2349,8 +2359,8 @@ do
             if d > 1e-9 then
               local excess = (d - e.maxLen)
               local ux, uy = dx / d, dy / d
-              local aLocked = (e.a == dragId) or (a.pinned == true)
-              local bLocked = (e.b == dragId) or (b.pinned == true)
+              local aLocked = (a.pinned == true) or ((not hasPinned) and (e.a == dragId))
+              local bLocked = (b.pinned == true) or ((not hasPinned) and (e.b == dragId))
               if not aLocked and not bLocked then
                 local half = excess * 0.5
                 a.worldx = ax + ux * half
@@ -2369,18 +2379,79 @@ do
           end
         end
       end
-      local draggedNow = nodes[dragId]
-      if draggedNow then
-        draggedNow.worldx = targetX
-        draggedNow.worldy = targetY
+      if not hasPinned then
+        local draggedNow = nodes[dragId]
+        if draggedNow then
+          draggedNow.worldx = targetX
+          draggedNow.worldy = targetY
+        end
       end
       if not changed then break end
     end
 
-    local dragged = nodes[dragId]
-    if dragged then
-      dragged.worldx = targetX
-      dragged.worldy = targetY
+    if hasPinned then
+      local adjacency = {}
+      for _,e in ipairs(edges) do
+        adjacency[e.a] = adjacency[e.a] or {}
+        adjacency[e.b] = adjacency[e.b] or {}
+        adjacency[e.a][#adjacency[e.a]+1] = { other = e.b, maxLen = e.maxLen }
+        adjacency[e.b][#adjacency[e.b]+1] = { other = e.a, maxLen = e.maxLen }
+      end
+
+      for _=1,12 do
+        local changed = false
+        local q, qi = {}, 1
+        local seen = {}
+        for _,id in ipairs(componentIds) do
+          local nn = nodes[id]
+          if nn and nn.pinned == true and not seen[id] then
+            seen[id] = true
+            q[#q+1] = id
+          end
+        end
+
+        while qi <= #q do
+          local id = q[qi]
+          qi = qi + 1
+          local n = nodes[id]
+          if n then
+            for _,link in ipairs(adjacency[id] or {}) do
+              local o = nodes[link.other]
+              if o and o.pinned ~= true then
+                local ax, ay = n.worldx or 0, n.worldy or 0
+                local bx, by = o.worldx or 0, o.worldy or 0
+                local dx = bx - ax
+                local dy = by - ay
+                local d2 = dx*dx + dy*dy
+                local maxLen2 = link.maxLen * link.maxLen
+                if d2 > maxLen2 then
+                  local d = math.sqrt(d2)
+                  if d > 1e-9 then
+                    local s = link.maxLen / d
+                    o.worldx = ax + dx * s
+                    o.worldy = ay + dy * s
+                    changed = true
+                  end
+                end
+                if not seen[link.other] then
+                  seen[link.other] = true
+                  q[#q+1] = link.other
+                end
+              end
+            end
+          end
+        end
+
+        if not changed then break end
+      end
+    end
+
+    if not hasPinned then
+      local draggedFinal = nodes[dragId]
+      if draggedFinal then
+        draggedFinal.worldx = targetX
+        draggedFinal.worldy = targetY
+      end
     end
   end
   local function applyPinnedRopeConstraints(anchorId, restWorld)
@@ -2437,6 +2508,63 @@ do
           end
         end
       end
+      if not changed then break end
+    end
+
+    -- Hard pass for pinned interaction: propagate exact max-length clamping
+    -- outward from pinned verts so pinned chains do not retain stretch.
+    local adjacency = {}
+    for _,e in ipairs(edges) do
+      adjacency[e.a] = adjacency[e.a] or {}
+      adjacency[e.b] = adjacency[e.b] or {}
+      adjacency[e.a][#adjacency[e.a]+1] = { other = e.b, maxLen = e.maxLen }
+      adjacency[e.b][#adjacency[e.b]+1] = { other = e.a, maxLen = e.maxLen }
+    end
+
+    for _=1,12 do
+      local changed = false
+      local q, qi = {}, 1
+      local seen = {}
+      for _,id in ipairs(componentIds) do
+        local n = nodes[id]
+        if n and n.pinned == true and not seen[id] then
+          seen[id] = true
+          q[#q+1] = id
+        end
+      end
+
+      while qi <= #q do
+        local id = q[qi]
+        qi = qi + 1
+        local n = nodes[id]
+        if n then
+          for _,link in ipairs(adjacency[id] or {}) do
+            local o = nodes[link.other]
+            if o and o.pinned ~= true then
+              local ax, ay = n.worldx or 0, n.worldy or 0
+              local bx, by = o.worldx or 0, o.worldy or 0
+              local dx = bx - ax
+              local dy = by - ay
+              local d2 = dx*dx + dy*dy
+              local maxLen2 = link.maxLen * link.maxLen
+              if d2 > maxLen2 then
+                local d = math.sqrt(d2)
+                if d > 1e-9 then
+                  local s = link.maxLen / d
+                  o.worldx = ax + dx * s
+                  o.worldy = ay + dy * s
+                  changed = true
+                end
+              end
+              if not seen[link.other] then
+                seen[link.other] = true
+                q[#q+1] = link.other
+              end
+            end
+          end
+        end
+      end
+
       if not changed then break end
     end
   end
