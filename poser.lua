@@ -462,9 +462,20 @@ do
       mirror = nil,
 
       prox_sign_2d = 1,
+
+      is_deform = false,
+      deform_parent = nil,
+      deform_descendant = nil,
+      deform_u = 0.5,
+      deform_v = 0,
     }
     order[#order+1] = id
     return id
+  end
+
+  local function isDeformNode(n)
+    return n and (n.is_deform == true) and n.deform_parent and n.deform_descendant
+      and nodes[n.deform_parent] and nodes[n.deform_descendant]
   end
 
   local function addNode(parentId, r)
@@ -642,17 +653,75 @@ do
     for _,rid in ipairs(roots) do
       rec(rid, 0, 0)
     end
+
+    if statePose then
+      for _,id in ipairs(order) do
+        local n = nodes[id]
+        if isDeformNode(n) then
+          local pa = nodes[n.deform_parent]
+          local pb = nodes[n.deform_descendant]
+          local ax, ay = pa.worldx or 0, pa.worldy or 0
+          local bx, by = pb.worldx or 0, pb.worldy or 0
+          local ux = clamp(tonumber(n.deform_u) or 0.5, 0, 1)
+          local vx = tonumber(n.deform_v) or 0
+          local dx = bx - ax
+          local dy = by - ay
+          local px = ax + dx * ux
+          local py = ay + dy * ux
+          if math.abs(vx) > 1e-9 then
+            local d = math.sqrt(dx*dx + dy*dy)
+            if d > 1e-9 then
+              px = px + (-dy / d) * vx
+              py = py + ( dx / d) * vx
+            end
+          end
+          n.worldx, n.worldy = px, py
+        end
+      end
+    end
   end
 
   local function computeActiveLocalsFromWorld()
     for _,id in ipairs(order) do
       local n = nodes[id]
       if n then
+        if statePose and isDeformNode(n) then
+          -- Pose position for deform verts is fully derived from its anchors.
+        elseif (not statePose) and isDeformNode(n) then
+          -- In rest, deform verts are edited directly and define rest offsets.
+          if n.parent and nodes[n.parent] then
+            local p = nodes[n.parent]
+            n.rest_localx, n.rest_localy = n.worldx - p.worldx, n.worldy - p.worldy
+          else
+            n.rest_localx, n.rest_localy = n.worldx, n.worldy
+          end
+
+          local pa = nodes[n.deform_parent]
+          local pb = nodes[n.deform_descendant]
+          if pa and pb then
+            local ax, ay = pa.worldx or 0, pa.worldy or 0
+            local bx, by = pb.worldx or 0, pb.worldy or 0
+            local px, py = n.worldx or 0, n.worldy or 0
+            local dx = bx - ax
+            local dy = by - ay
+            local len2 = dx*dx + dy*dy
+            if len2 > 1e-9 then
+              local t = ((px-ax)*dx + (py-ay)*dy) / len2
+              n.deform_u = clamp(t, 0, 1)
+              local len = math.sqrt(len2)
+              n.deform_v = (((px-ax) * (-dy)) + ((py-ay) * dx)) / len
+            else
+              n.deform_u = 0.5
+              n.deform_v = 0
+            end
+          end
+        else
         if n.parent and nodes[n.parent] then
           local p = nodes[n.parent]
           setActiveLocal(n, n.worldx - p.worldx, n.worldy - p.worldy)
         else
           setActiveLocal(n, n.worldx, n.worldy)
+        end
         end
       end
     end
@@ -912,6 +981,9 @@ do
     for _,id in ipairs(order) do
       local p = proj and proj[id]
       if p then
+        if statePose and isDeformNode(nodes[id]) then
+          goto continue_pick
+        end
         local pr = math.max(6, p.r)
         local d = dist2(x,y, p.x,p.y)
         local pickR = pr + 6
@@ -920,6 +992,7 @@ do
           bestD = d
         end
       end
+      ::continue_pick::
     end
     return best
   end
@@ -1051,7 +1124,12 @@ do
     buildChildren()
 
     local ids = {}
-    forEachDescendant(id, function(cid) ids[#ids+1] = cid end)
+    forEachDescendant(id, function(cid)
+      local cn = nodes[cid]
+      if not (statePose and isDeformNode(cn)) then
+        ids[#ids+1] = cid
+      end
+    end)
 
     local base = {}
     for _,cid in ipairs(ids) do
@@ -1310,6 +1388,74 @@ do
     return childId
   end
 
+  local function createDeformBetweenSelected()
+    if not stateRest then return end
+    if selectionCount() ~= 2 then return end
+
+    local a = selectedList[1]
+    local b = selectedList[2]
+    if not (a and b and nodes[a] and nodes[b]) then return end
+
+    computeWorldFromActiveLocals()
+    buildChildren()
+
+    local descendant = nil
+    local cur = nodes[b]
+    while cur and cur.parent do
+      if cur.parent == a then descendant = b break end
+      cur = nodes[cur.parent]
+    end
+    if not descendant then
+      cur = nodes[a]
+      while cur and cur.parent do
+        if cur.parent == b then descendant = a break end
+        cur = nodes[cur.parent]
+      end
+    end
+
+    local parentId = nil
+    local descendantId = nil
+    if descendant == b then
+      parentId, descendantId = a, b
+    elseif descendant == a then
+      parentId, descendantId = b, a
+    else
+      parentId, descendantId = a, b
+    end
+
+    local pa = nodes[parentId]
+    local pb = nodes[descendantId]
+    local ax, ay = pa.worldx or 0, pa.worldy or 0
+    local bx, by = pb.worldx or 0, pb.worldy or 0
+
+    local id = addNode(descendantId, pb.rest_r)
+    local n = nodes[id]
+    n.is_deform = true
+    n.deform_parent = parentId
+    n.deform_descendant = descendantId
+    n.deform_u = 0.5
+    n.deform_v = 0
+
+    local wx = ax + (bx - ax) * n.deform_u
+    local wy = ay + (by - ay) * n.deform_u
+
+    if n.parent and nodes[n.parent] then
+      local p0 = nodes[n.parent]
+      n.rest_localx = wx - (p0.worldx or 0)
+      n.rest_localy = wy - (p0.worldy or 0)
+    else
+      n.rest_localx = wx
+      n.rest_localy = wy
+    end
+    n.pose_localx, n.pose_localy = n.rest_localx, n.rest_localy
+    n.pose_pos_set = false
+
+    setSingleSelection(id)
+    computeWorldFromActiveLocals()
+    computeActiveLocalsFromWorld()
+    computeWorldFromActiveLocals()
+  end
+
   local function doParent()
     if selectionCount() < 2 then return end
     local parentId = lastSelected
@@ -1321,12 +1467,19 @@ do
         if not isDescendant(parentId, id) then
           nodes[id].parent = parentId
 
+          if isDeformNode(nodes[id]) then
+            nodes[id].deform_parent = parentId
+          end
+
           if mirror_mods then
             local c = nodes[id]
             local p = nodes[parentId]
             if c and p and c.mirror and p.mirror and nodes[c.mirror] and nodes[p.mirror] then
               if not isDescendant(p.mirror, c.mirror) then
                 nodes[c.mirror].parent = p.mirror
+                if isDeformNode(nodes[c.mirror]) then
+                  nodes[c.mirror].deform_parent = p.mirror
+                end
               end
             end
           end
@@ -1382,6 +1535,11 @@ do
       nodes[nid].sphere = (s.sphere ~= false)
       nodes[nid].sphere_rot = (s.sphere_rot == true)
       nodes[nid].orient_lock = (s.orient_lock == true)
+      nodes[nid].is_deform = (s.is_deform == true)
+      nodes[nid].deform_u = clamp(tonumber(s.deform_u) or 0.5, 0, 1)
+      nodes[nid].deform_v = tonumber(s.deform_v) or 0
+      nodes[nid].deform_parent = (s.deform_parent and map[s.deform_parent]) or s.deform_parent
+      nodes[nid].deform_descendant = (s.deform_descendant and map[s.deform_descendant]) or s.deform_descendant
     end
 
     local desiredW = {}
@@ -1534,6 +1692,19 @@ do
       end
     end
     order = newOrder
+
+    for _,id in ipairs(order) do
+      local n = nodes[id]
+      if n and n.is_deform == true then
+        if toDelete[n.deform_parent] or toDelete[n.deform_descendant] then
+          n.is_deform = false
+          n.deform_parent = nil
+          n.deform_descendant = nil
+          n.deform_u = 0.5
+          n.deform_v = 0
+        end
+      end
+    end
 
     local newLinks = {}
     for k,v in pairs(links) do
@@ -1887,10 +2058,10 @@ do
     local out = {}
     for _,id in ipairs(order) do
       local n = nodes[id]
-      if n and n.sphere_rot == true and n.children and #n.children > 0 then
+      if n and (not isDeformNode(n)) and n.sphere_rot == true and n.children and #n.children > 0 then
         local cId = nil
         for _,cid in ipairs(n.children) do
-          if nodes[cid] and projRaster[cid] and projRaster[id] then
+          if nodes[cid] and (not isDeformNode(nodes[cid])) and projRaster[cid] and projRaster[id] then
             cId = cid
             break
           end
@@ -2004,9 +2175,11 @@ do
           end
         end
 
-        local px = math.floor(pdot.x + 0.5)
-        local py = math.floor(pdot.y + 0.5)
-        drawPixelStrong(img, px, py, pix)
+        if not (statePose and isDeformNode(nodes[id])) then
+          local px = math.floor(pdot.x + 0.5)
+          local py = math.floor(pdot.y + 0.5)
+          drawPixelStrong(img, px, py, pix)
+        end
       end
     end
 
@@ -2157,9 +2330,11 @@ do
   local function updateSphereUI(dlg)
     if not dlg then return end
     if lastSelected and nodes[lastSelected] then
-      dlg:modify{ id="sphere_vert", enabled=true, selected=(nodes[lastSelected].sphere ~= false) }
-      dlg:modify{ id="sphere_rot", enabled=true, selected=(nodes[lastSelected].sphere_rot == true) }
-      dlg:modify{ id="orient_lock", enabled=true, selected=(nodes[lastSelected].orient_lock == true) }
+      local n = nodes[lastSelected]
+      local enabled = not (statePose and isDeformNode(n))
+      dlg:modify{ id="sphere_vert", enabled=enabled, selected=(n.sphere ~= false) }
+      dlg:modify{ id="sphere_rot", enabled=enabled, selected=(n.sphere_rot == true) }
+      dlg:modify{ id="orient_lock", enabled=enabled, selected=(n.orient_lock == true) }
     else
       dlg:modify{ id="sphere_vert", enabled=false, selected=false }
       dlg:modify{ id="sphere_rot", enabled=false, selected=false }
@@ -2199,7 +2374,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 10
+    data["version"] = 11
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -2257,6 +2432,11 @@ do
       data["node_"..i.."_pinned"] = (n.pinned == true)
       data["node_"..i.."_orient_lock"] = (n.orient_lock == true)
       data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 1, -1, 1)
+      data["node_"..i.."_is_deform"] = (n.is_deform == true)
+      data["node_"..i.."_deform_parent"] = n.deform_parent or ""
+      data["node_"..i.."_deform_descendant"] = n.deform_descendant or ""
+      data["node_"..i.."_deform_u"] = tonumber(n.deform_u) or 0.5
+      data["node_"..i.."_deform_v"] = tonumber(n.deform_v) or 0
     end
 
     local linkKeys = {}
@@ -2381,6 +2561,14 @@ do
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
         if ps2d == nil then ps2d = 1 end
         n.prox_sign_2d = clamp(ps2d, -1, 1)
+
+        n.is_deform = (t["node_"..i.."_is_deform"] == true)
+        local dp = tostring(t["node_"..i.."_deform_parent"] or "")
+        local dd = tostring(t["node_"..i.."_deform_descendant"] or "")
+        n.deform_parent = (dp ~= "") and dp or nil
+        n.deform_descendant = (dd ~= "") and dd or nil
+        n.deform_u = clamp(tonumber(t["node_"..i.."_deform_u"]) or 0.5, 0, 1)
+        n.deform_v = tonumber(t["node_"..i.."_deform_v"]) or 0
       end
     end
 
@@ -2447,7 +2635,7 @@ do
 
   restRangeToParent = function(id, restWorld)
     local n = nodes[id]
-    if not n or not n.parent or not nodes[n.parent] then return nil end
+    if not n or isDeformNode(n) or not n.parent or not nodes[n.parent] then return nil end
     local c = restWorld[id]
     local p = restWorld[n.parent]
     if not c or not p then return nil end
@@ -2500,7 +2688,7 @@ do
     for _,id in ipairs(componentIds) do
       local n = nodes[id]
       if n and n.pinned == true then hasPinned = true end
-      if n and n.parent and nodes[n.parent] then
+      if n and (not isDeformNode(n)) and n.parent and nodes[n.parent] then
         local maxLen = restRangeToParent(id, restWorld)
         if maxLen and maxLen > 1e-6 then
           edges[#edges+1] = { a = n.parent, b = id, maxLen = maxLen }
@@ -2806,7 +2994,7 @@ do
     for _,id in ipairs(componentIds) do
       local n = nodes[id]
       if n and n.pinned == true then hasPinned = true end
-      if n and n.parent and nodes[n.parent] then
+      if n and (not isDeformNode(n)) and n.parent and nodes[n.parent] then
         local maxLen = restRangeToParent(id, restWorld)
         if maxLen and maxLen > 1e-6 then
           edges[#edges+1] = { a=n.parent, b=id, maxLen=maxLen }
@@ -3009,7 +3197,16 @@ do
         local r = base
         if statePose then
           local ez = (effZ and (tonumber(effZ[id]) or 0)) or 0
-          r = clamp(math.max(base, base + (base * (ez / 100.0))), 1, 400)
+          if isDeformNode(n) then
+            local dn = nodes[n.deform_descendant]
+            local du = clamp(tonumber(n.deform_u) or 0.5, 0, 1)
+            local dbase = clamp(tonumber((dn and dn.rest_r) or base) or base, R_MIN, R_MAX)
+            local dz = (effZ and dn and (tonumber(effZ[dn.id]) or 0)) or 0
+            local dr = clamp(math.max(dbase, dbase + (dbase * (dz / 100.0))), 1, 400)
+            r = dr * du
+          else
+            r = clamp(math.max(base, base + (base * (ez / 100.0))), 1, 400)
+          end
           if n.parent and nodes[n.parent] and restWorld then
             local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
             if boosted then r = math.max(base, boosted) end
@@ -3045,8 +3242,10 @@ do
         local d = math.sqrt(vx*vx + vy*vy)
 
         local shift = 0
-        local pr = radiusMap and radiusMap[n.parent]
-        if pr then shift = (tonumber(pr.r) or 0) - (tonumber(pr.base) or 0) end
+        if not isDeformNode(n) then
+          local pr = radiusMap and radiusMap[n.parent]
+          if pr then shift = (tonumber(pr.r) or 0) - (tonumber(pr.base) or 0) end
+        end
 
         if d > 1e-9 then
           local ux, uy = vx / d, vy / d
@@ -3171,16 +3370,18 @@ do
           end
         end
 
-        local px = math.floor(pdot.x + 0.5)
-        local py = math.floor(pdot.y + 0.5)
-        if isSel then
-          gc.color = Color{r=60,g=220,b=60,a=255}
-        elseif isPinned then
-          gc.color = Color{r=70,g=140,b=255,a=255}
-        else
-          gc.color = Color{r=0,g=0,b=0,a=aa}
+        if not (statePose and isDeformNode(nodes[id])) then
+          local px = math.floor(pdot.x + 0.5)
+          local py = math.floor(pdot.y + 0.5)
+          if isSel then
+            gc.color = Color{r=60,g=220,b=60,a=255}
+          elseif isPinned then
+            gc.color = Color{r=70,g=140,b=255,a=255}
+          else
+            gc.color = Color{r=0,g=0,b=0,a=aa}
+          end
+          gc:fillRect(Rectangle(px-1, py-1, 3, 3))
         end
-        gc:fillRect(Rectangle(px-1, py-1, 3, 3))
       end
     end
   end
@@ -3237,10 +3438,17 @@ do
       dlg:modify{ id="btn_parent", visible=isRest }
       dlg:modify{ id="btn_mirror", visible=isRest }
       dlg:modify{ id="btn_delete", visible=isRest }
+      dlg:modify{ id="btn_add_deform", visible=isRest, enabled=(selectionCount() == 2) }
       dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
       dlg:modify{ id="btn_revert_all", visible=(not isRest) }
       dlg:modify{ id="btn_reset_view_pose", visible=(not isRest) }
+    end)
+  end
+
+  local function updateDeformButtonUI()
+    pcall(function()
+      dlg:modify{ id="btn_add_deform", enabled=(stateRest and selectionCount() == 2), visible=stateRest }
     end)
   end
 
@@ -3300,6 +3508,7 @@ do
       updateControlsFor3D()
       updateLinkUI(dlg)
       updateSphereUI(dlg)
+      updateDeformButtonUI()
       refreshUI()
     end
   }
@@ -3350,6 +3559,7 @@ do
     onclick=function()
       setState(true, false, dlg)
       updateControlsForState()
+      updateDeformButtonUI()
       refreshUI()
     end
   }
@@ -3360,6 +3570,7 @@ do
     onclick=function()
       setState(false, true, dlg)
       updateControlsForState()
+      updateDeformButtonUI()
       refreshUI()
     end
   }
@@ -3515,11 +3726,16 @@ do
         local hit = pickNodeAt(mx,my, proj)
         local sh = evShift(ev)
 
+        if statePose and hit and isDeformNode(nodes[hit]) then
+          hit = nil
+        end
+
         if not hit then
           if not sh then
             clearSelection()
             updateLinkUI(dlg)
             updateSphereUI(dlg)
+            updateDeformButtonUI()
             refreshUI()
           end
           return
@@ -3528,6 +3744,7 @@ do
         if sh then addToSelection(hit) else setSingleSelection(hit) end
         updateLinkUI(dlg)
         updateSphereUI(dlg)
+        updateDeformButtonUI()
 
         if modeAdd and stateRest then
           local newId = createChildAndDrag(hit, mx, my)
@@ -3548,10 +3765,12 @@ do
 
       if btnIs(ev, "RIGHT") then
         local hit = pickNodeAt(mx,my, proj)
+        if statePose and hit and isDeformNode(nodes[hit]) then return end
         if not hit then return end
         setSingleSelection(hit)
         updateLinkUI(dlg)
         updateSphereUI(dlg)
+        updateDeformButtonUI()
         beginDrag(hit, mx, my, proj, true)
         refreshUI()
         return
@@ -3879,6 +4098,19 @@ do
       deleteSelectedButKeepChildren()
       updateLinkUI(dlg)
       updateSphereUI(dlg)
+      updateDeformButtonUI()
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_add_deform",
+    text="add deform",
+    enabled=false,
+    onclick=function()
+      createDeformBetweenSelected()
+      updateLinkUI(dlg)
+      updateSphereUI(dlg)
+      updateDeformButtonUI()
       refreshUI()
     end
   }
@@ -4034,6 +4266,7 @@ do
   updateControlsFor3D()
   updateLinkUI(dlg)
   updateSphereUI(dlg)
+  updateDeformButtonUI()
 
   dlg:show{ wait=false }
   refreshUI()
