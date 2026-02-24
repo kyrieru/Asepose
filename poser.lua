@@ -426,6 +426,9 @@ do
   local roots = {}
   local nextId = 1
   local links = {}
+  local selected = {}
+  local selectedList = {}
+  local lastSelected = nil
 
   local function newId()
     local id = tostring(nextId)
@@ -512,35 +515,49 @@ do
     end
   end
 
-  local function pairKey(a,b)
-    if not a or not b or a==b then return nil end
-    if tostring(a) < tostring(b) then return a.."|"..b end
-    return b.."|"..a
-  end
-
-  local function isParentChild(a,b)
-    local na, nb = nodes[a], nodes[b]
-    if not na or not nb then return false end
-    return (na.parent == b) or (nb.parent == a)
-  end
-
-  local function getLinkState(a,b)
-    local k = pairKey(a,b)
-    if not k then return false end
-    local v = links[k]
-    if v ~= nil then return (v == true) end
-    if isParentChild(a,b) then return true end
-    return false
-  end
-
-  local function setLinkState(a,b,on)
-    local k = pairKey(a,b)
-    if not k then return end
-    if isParentChild(a,b) then
-      links[k] = (on == true) and true or false
-    else
-      if on == true then links[k] = true else links[k] = nil end
+  local function sortedUniqueIds(ids)
+    local out, seen = {}, {}
+    for _,id in ipairs(ids or {}) do
+      local s = tostring(id)
+      if nodes[s] and not seen[s] then
+        seen[s] = true
+        out[#out+1] = s
+      end
     end
+    table.sort(out, function(a,b) return tostring(a) < tostring(b) end)
+    return out
+  end
+
+  local function linkGroupKey(ids)
+    local list = sortedUniqueIds(ids)
+    if #list < 2 then return nil end
+    return table.concat(list, "|")
+  end
+
+  local function parseLinkGroupKey(key)
+    local ids = {}
+    for part in string.gmatch(tostring(key or ""), "[^|]+") do
+      ids[#ids+1] = tostring(part)
+    end
+    ids = sortedUniqueIds(ids)
+    if #ids < 2 then return nil end
+    return ids
+  end
+
+  local function getSelectedGroupKey()
+    return linkGroupKey(selectedList)
+  end
+
+  local function getLinkStateForSelection()
+    local k = getSelectedGroupKey()
+    if not k then return false end
+    return (links[k] == true)
+  end
+
+  local function setLinkStateForSelection(on)
+    local k = getSelectedGroupKey()
+    if not k then return end
+    if on == true then links[k] = true else links[k] = nil end
   end
 
   local function clearMirrorFor(id)
@@ -849,9 +866,9 @@ do
   -- =========================
   -- selection
   -- =========================
-  local selected = {}
-  local selectedList = {}
-  local lastSelected = nil
+  selected = {}
+  selectedList = {}
+  lastSelected = nil
 
   local function selectionCount() return #selectedList end
 
@@ -1451,15 +1468,25 @@ do
       setMirrorPair(sid, map[sid])
     end
 
+    local mirroredLinks = {}
     for k,v in pairs(links) do
-      if v == true or v == false then
-        local a,b = k:match("^(.-)%|(.-)$")
-        if a and b and map[a] and map[b] then
-          local nk = pairKey(map[a], map[b])
-          if nk then links[nk] = v end
+      if v == true then
+        local ids = parseLinkGroupKey(k)
+        if ids then
+          local mapped = {}
+          local ok = true
+          for _,id in ipairs(ids) do
+            if not map[id] then ok = false break end
+            mapped[#mapped+1] = map[id]
+          end
+          if ok then
+            local nk = linkGroupKey(mapped)
+            if nk then mirroredLinks[nk] = true end
+          end
         end
       end
     end
+    for k,_ in pairs(mirroredLinks) do links[k] = true end
 
     buildChildren()
     computeWorldFromActiveLocals()
@@ -1507,9 +1534,18 @@ do
 
     local newLinks = {}
     for k,v in pairs(links) do
-      local a,b = k:match("^(.-)%|(.-)$")
-      if a and b and nodes[a] and nodes[b] then
-        newLinks[k] = v
+      if v == true then
+        local ids = parseLinkGroupKey(k)
+        if ids then
+          local allExist = true
+          for _,id in ipairs(ids) do
+            if not nodes[id] then allExist = false break end
+          end
+          if allExist then
+            local nk = linkGroupKey(ids)
+            if nk then newLinks[nk] = true end
+          end
+        end
       end
     end
     links = newLinks
@@ -1766,6 +1802,37 @@ do
     end
   end
 
+  local outerTangentSegment
+
+  local function orderedGroupIdsForBoundary(ids, projRaster)
+    local pts = {}
+    for _,id in ipairs(ids or {}) do
+      local p = projRaster[id]
+      if p then pts[#pts+1] = { id=id, x=p.x, y=p.y } end
+    end
+    if #pts < 2 then return nil end
+    if #pts == 2 then return { pts[1].id, pts[2].id } end
+
+    local cx0, cy0 = 0, 0
+    for _,p in ipairs(pts) do
+      cx0 = cx0 + p.x
+      cy0 = cy0 + p.y
+    end
+    cx0 = cx0 / #pts
+    cy0 = cy0 / #pts
+
+    table.sort(pts, function(a,b)
+      local aa = math.atan(a.y - cy0, a.x - cx0)
+      local ab = math.atan(b.y - cy0, b.x - cx0)
+      if aa == ab then return tostring(a.id) < tostring(b.id) end
+      return aa < ab
+    end)
+
+    local out = {}
+    for i=1,#pts do out[i] = pts[i].id end
+    return out
+  end
+
   local function renderVertsAndCirclesToImage()
     computeWorldFromActiveLocals()
     local effZ = statePose and buildEffectiveZMap() or nil
@@ -1778,26 +1845,37 @@ do
 
     for k,v in pairs(links) do
       if v == true then
-        local a,b = k:match("^(.-)%|(.-)$")
-        local pa, pb = projRaster[a], projRaster[b]
-        if pa and pb then
-          local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
-          local pix = app.pixelColor.rgba(0, 0, 0, aa)
-          drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
-        end
-      end
-    end
-
-    for _,id in ipairs(order) do
-      local n = nodes[id]
-      if n and n.parent and nodes[n.parent] then
-        if getLinkState(id, n.parent) then
-          local pa = projRaster[n.parent]
-          local pb = projRaster[id]
-          if pa and pb then
-            local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
-            local pix = app.pixelColor.rgba(0, 0, 0, aa)
-            drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
+        local ids = parseLinkGroupKey(k)
+        if ids then
+          local ordered = orderedGroupIdsForBoundary(ids, projRaster)
+          if ordered then
+            local count = #ordered
+            local edgeCount = (count == 2) and 1 or count
+            local cx0, cy0 = 0, 0
+            for i=1,count do
+              local p = projRaster[ordered[i]]
+              if p then
+                cx0 = cx0 + p.x
+                cy0 = cy0 + p.y
+              end
+            end
+            cx0 = cx0 / count
+            cy0 = cy0 / count
+            for i=1,edgeCount do
+              local a = ordered[i]
+              local b = ordered[(i % count) + 1]
+              local pa, pb = projRaster[a], projRaster[b]
+              if pa and pb then
+                local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+                local pix = app.pixelColor.rgba(0, 0, 0, aa)
+                if count == 2 then
+                  drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
+                else
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0)
+                  if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
+                end
+              end
+            end
           end
         end
       end
@@ -1873,6 +1951,42 @@ do
     side(-1)
   end
 
+  outerTangentSegment = function(ax, ay, bx, by, ra, rb, cx0, cy0)
+    local r1 = math.max(0, ra)
+    local r2 = math.max(0, rb)
+    local dx = bx - ax
+    local dy = by - ay
+    local d2 = dx*dx + dy*dy
+    if d2 < 1e-9 then return nil end
+    local d = math.sqrt(d2)
+    local dr = (r1 - r2)
+    if d <= math.abs(dr) + 1e-6 then return nil end
+
+    local base = math.atan(dy, dx)
+    local c = clamp(dr / d, -1.0, 1.0)
+    local off = math.acos(c)
+
+    local best = nil
+    for _,sign in ipairs({1, -1}) do
+      local th = base + sign * off
+      local ux = math.cos(th)
+      local uy = math.sin(th)
+      local x1 = ax + ux * r1
+      local y1 = ay + uy * r1
+      local x2 = bx + ux * r2
+      local y2 = by + uy * r2
+      local mx = (x1 + x2) * 0.5
+      local my = (y1 + y2) * 0.5
+      local vx = mx - cx0
+      local vy = my - cy0
+      local score = vx*vx + vy*vy
+      if (not best) or score > best.score then
+        best = { x1=x1, y1=y1, x2=x2, y2=y2, score=score }
+      end
+    end
+    return best
+  end
+
   -- =========================
   -- 3D grid (FLOOR XZ at bottom)
   -- =========================
@@ -1925,10 +2039,8 @@ do
   -- =========================
   local function updateLinkUI(dlg)
     if not dlg then return end
-    if #selectedList == 2 then
-      local a = selectedList[1]
-      local b = selectedList[2]
-      dlg:modify{ id="link_pair", enabled=true, selected=getLinkState(a,b) }
+    if #selectedList >= 2 then
+      dlg:modify{ id="link_pair", enabled=true, selected=getLinkStateForSelection() }
     else
       dlg:modify{ id="link_pair", enabled=false, selected=false }
     end
@@ -2037,15 +2149,14 @@ do
     end
 
     local linkKeys = {}
-    for k,_ in pairs(links) do linkKeys[#linkKeys+1] = k end
+    for k,v in pairs(links) do
+      if v == true then linkKeys[#linkKeys+1] = k end
+    end
     table.sort(linkKeys, function(a,b) return tostring(a) < tostring(b) end)
     data["link_count"] = #linkKeys
     for i,k in ipairs(linkKeys) do
       data["link_"..i.."_key"] = k
-      local v = links[k]
-      if v == true then data["link_"..i.."_val"] = 1
-      elseif v == false then data["link_"..i.."_val"] = 0
-      else data["link_"..i.."_val"] = "" end
+      data["link_"..i.."_val"] = 1
     end
 
     local ok, err = saveKeyValueFile(path, data)
@@ -2176,8 +2287,11 @@ do
       local k = tostring(t["link_"..i.."_key"] or "")
       local v = t["link_"..i.."_val"]
       if k ~= "" then
-        if v == 1 or v == true or v == "1" then links[k] = true
-        elseif v == 0 or v == false or v == "0" then links[k] = false end
+        if v == 1 or v == true or v == "1" then
+          local ids = parseLinkGroupKey(k)
+          local nk = ids and linkGroupKey(ids) or nil
+          if nk then links[nk] = true end
+        end
       end
     end
 
@@ -2887,26 +3001,37 @@ do
 
     for k,v in pairs(links) do
       if v == true then
-        local a,b = k:match("^(.-)%|(.-)$")
-          local pa, pb = projRaster[a], projRaster[b]
-          if pa and pb then
-            local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
-            gc.color = Color{r=0,g=0,b=0,a=aa}
-            drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
-          end
-        end
-    end
-
-    for _,id in ipairs(order) do
-      local n = nodes[id]
-      if n and n.parent and nodes[n.parent] then
-        if getLinkState(id, n.parent) then
-          local pa = projRaster[n.parent]
-          local pb = projRaster[id]
-          if pa and pb then
-            local aa = math.min(alphaMap[n.parent] or 255, alphaMap[id] or 255)
-            gc.color = Color{r=0,g=0,b=0,a=aa}
-            drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+        local ids = parseLinkGroupKey(k)
+        if ids then
+          local ordered = orderedGroupIdsForBoundary(ids, projRaster)
+          if ordered then
+            local count = #ordered
+            local edgeCount = (count == 2) and 1 or count
+            local cx0, cy0 = 0, 0
+            for i=1,count do
+              local p = projRaster[ordered[i]]
+              if p then
+                cx0 = cx0 + p.x
+                cy0 = cy0 + p.y
+              end
+            end
+            cx0 = cx0 / count
+            cy0 = cy0 / count
+            for i=1,edgeCount do
+              local a = ordered[i]
+              local b = ordered[(i % count) + 1]
+              local pa, pb = projRaster[a], projRaster[b]
+              if pa and pb then
+                local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+                gc.color = Color{r=0,g=0,b=0,a=aa}
+                if count == 2 then
+                  drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+                else
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0)
+                  if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
+                end
+              end
+            end
           end
         end
       end
@@ -3684,14 +3809,12 @@ do
     selected=false,
     enabled=false,
     onclick=function()
-      if #selectedList ~= 2 then
+      if #selectedList < 2 then
         updateLinkUI(dlg)
         return
       end
-      local a = selectedList[1]
-      local b = selectedList[2]
       local on = (dlg.data.link_pair == true)
-      setLinkState(a,b,on)
+      setLinkStateForSelection(on)
       refreshUI()
     end
   }
