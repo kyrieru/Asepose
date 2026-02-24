@@ -2056,33 +2056,79 @@ do
 
   local outerTangentSegment
 
-  local function orderedGroupIdsForBoundary(ids, projRaster)
-    local pts = {}
+  local function orderedGroupBoundaryEdges(ids, projRaster)
+    local circles = {}
     for _,id in ipairs(ids or {}) do
       local p = projRaster[id]
-      if p then pts[#pts+1] = { id=id, x=p.x, y=p.y } end
+      if p then circles[#circles+1] = { id=id, x=p.x, y=p.y, r=math.max(0, p.r or 0) } end
     end
-    if #pts < 2 then return nil end
-    if #pts == 2 then return { pts[1].id, pts[2].id } end
-
-    local cx0, cy0 = 0, 0
-    for _,p in ipairs(pts) do
-      cx0 = cx0 + p.x
-      cy0 = cy0 + p.y
+    if #circles < 2 then return nil end
+    if #circles == 2 then
+      return {
+        { a=circles[1].id, b=circles[2].id, ux=0, uy=0, isPair=true }
+      }
     end
-    cx0 = cx0 / #pts
-    cy0 = cy0 / #pts
 
-    table.sort(pts, function(a,b)
-      local aa = math.atan(a.y - cy0, a.x - cx0)
-      local ab = math.atan(b.y - cy0, b.x - cx0)
-      if aa == ab then return tostring(a.id) < tostring(b.id) end
-      return aa < ab
-    end)
+    local samples = math.max(120, #circles * 36)
+    local winners = {}
+    for i=0,samples-1 do
+      local a = (i / samples) * math.pi * 2
+      local ux = math.cos(a)
+      local uy = math.sin(a)
+      local bestId = nil
+      local bestS = -math.huge
+      for _,c in ipairs(circles) do
+        local s = c.x * ux + c.y * uy + c.r
+        if s > bestS + 1e-9 then
+          bestS = s
+          bestId = c.id
+        end
+      end
+      winners[#winners+1] = { id=bestId, ux=ux, uy=uy }
+    end
 
-    local out = {}
-    for i=1,#pts do out[i] = pts[i].id end
-    return out
+    local groups = {}
+    for i=1,#winners do
+      local w = winners[i]
+      if #groups == 0 or groups[#groups].id ~= w.id then
+        groups[#groups+1] = { id=w.id, ux=w.ux, uy=w.uy }
+      end
+    end
+
+    if #groups > 1 and groups[1].id == groups[#groups].id then
+      local g1, gn = groups[1], groups[#groups]
+      local mux = g1.ux + gn.ux
+      local muy = g1.uy + gn.uy
+      local md2 = mux*mux + muy*muy
+      if md2 > 1e-9 then
+        local inv = 1 / math.sqrt(md2)
+        g1.ux, g1.uy = mux * inv, muy * inv
+      end
+      groups[#groups] = nil
+    end
+
+    if #groups < 2 then return nil end
+
+    local edges = {}
+    for i=1,#groups do
+      local g0 = groups[i]
+      local g1 = groups[(i % #groups) + 1]
+      if g0.id ~= g1.id then
+        local ux = g0.ux + g1.ux
+        local uy = g0.uy + g1.uy
+        local d2 = ux*ux + uy*uy
+        if d2 > 1e-9 then
+          local inv = 1 / math.sqrt(d2)
+          ux, uy = ux * inv, uy * inv
+        else
+          ux, uy = g1.ux, g1.uy
+        end
+        edges[#edges+1] = { a=g0.id, b=g1.id, ux=ux, uy=uy }
+      end
+    end
+
+    if #edges < 2 then return nil end
+    return edges
   end
 
 
@@ -2155,31 +2201,25 @@ do
       if v == true then
         local ids = parseLinkGroupKey(k)
         if ids then
-          local ordered = orderedGroupIdsForBoundary(ids, projRaster)
-          if ordered then
-            local count = #ordered
-            local edgeCount = (count == 2) and 1 or count
-            local cx0, cy0 = 0, 0
-            for i=1,count do
-              local p = projRaster[ordered[i]]
-              if p then
-                cx0 = cx0 + p.x
-                cy0 = cy0 + p.y
-              end
+          local edges = orderedGroupBoundaryEdges(ids, projRaster)
+          if edges then
+            local cx0, cy0, ccount = 0, 0, 0
+            for _,e in ipairs(edges) do
+              local pa = projRaster[e.a]
+              local pb = projRaster[e.b]
+              if pa then cx0 = cx0 + pa.x; cy0 = cy0 + pa.y; ccount = ccount + 1 end
+              if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
-            cx0 = cx0 / count
-            cy0 = cy0 / count
-            for i=1,edgeCount do
-              local a = ordered[i]
-              local b = ordered[(i % count) + 1]
-              local pa, pb = projRaster[a], projRaster[b]
+            if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
+            for _,e in ipairs(edges) do
+              local pa, pb = projRaster[e.a], projRaster[e.b]
               if pa and pb then
-                local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+                local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
                 local pix = app.pixelColor.rgba(0, 0, 0, aa)
-                if count == 2 then
+                if e.isPair == true then
                   drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
                 else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0)
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy)
                   if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
                 end
               end
@@ -2266,7 +2306,7 @@ do
     side(-1)
   end
 
-  outerTangentSegment = function(ax, ay, bx, by, ra, rb, cx0, cy0)
+  outerTangentSegment = function(ax, ay, bx, by, ra, rb, cx0, cy0, prefUx, prefUy)
     local r1 = math.max(0, ra)
     local r2 = math.max(0, rb)
     local dx = bx - ax
@@ -2292,9 +2332,18 @@ do
       local y2 = by + uy * r2
       local mx = (x1 + x2) * 0.5
       local my = (y1 + y2) * 0.5
-      local vx = mx - cx0
-      local vy = my - cy0
-      local score = vx*vx + vy*vy
+      local score
+      local pd2 = (prefUx or 0)*(prefUx or 0) + (prefUy or 0)*(prefUy or 0)
+      if pd2 > 1e-9 then
+        local invp = 1 / math.sqrt(pd2)
+        local pux = prefUx * invp
+        local puy = prefUy * invp
+        score = mx * pux + my * puy
+      else
+        local vx = mx - cx0
+        local vy = my - cy0
+        score = vx*vx + vy*vy
+      end
       if (not best) or score > best.score then
         best = { x1=x1, y1=y1, x2=x2, y2=y2, score=score }
       end
@@ -3349,31 +3398,25 @@ do
       if v == true then
         local ids = parseLinkGroupKey(k)
         if ids then
-          local ordered = orderedGroupIdsForBoundary(ids, projRaster)
-          if ordered then
-            local count = #ordered
-            local edgeCount = (count == 2) and 1 or count
-            local cx0, cy0 = 0, 0
-            for i=1,count do
-              local p = projRaster[ordered[i]]
-              if p then
-                cx0 = cx0 + p.x
-                cy0 = cy0 + p.y
-              end
+          local edges = orderedGroupBoundaryEdges(ids, projRaster)
+          if edges then
+            local cx0, cy0, ccount = 0, 0, 0
+            for _,e in ipairs(edges) do
+              local pa = projRaster[e.a]
+              local pb = projRaster[e.b]
+              if pa then cx0 = cx0 + pa.x; cy0 = cy0 + pa.y; ccount = ccount + 1 end
+              if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
-            cx0 = cx0 / count
-            cy0 = cy0 / count
-            for i=1,edgeCount do
-              local a = ordered[i]
-              local b = ordered[(i % count) + 1]
-              local pa, pb = projRaster[a], projRaster[b]
+            if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
+            for _,e in ipairs(edges) do
+              local pa, pb = projRaster[e.a], projRaster[e.b]
               if pa and pb then
-                local aa = math.min(alphaMap[a] or 255, alphaMap[b] or 255)
+                local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
                 gc.color = Color{r=0,g=0,b=0,a=aa}
-                if count == 2 then
+                if e.isPair == true then
                   drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                 else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0)
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy)
                   if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
                 end
               end
