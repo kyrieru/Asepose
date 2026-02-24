@@ -31,6 +31,8 @@
 --       * order alpha: compares each vert to its parent depth from camera POV.
 --       * depth alpha: maps nearest vert to 100% and farthest vert to 10% alpha.
 --
+-- Right-drag (2D): rope-style IK solve with soft (max-length-only) constraints across the full connected component; verts may overlap and motion propagates through ancestors/descendants.
+
 -- Multi-select:
 --   - Shift+click adds verts to selection (last clicked becomes "last selected").
 --   - Click empty space deselects all.
@@ -2208,273 +2210,126 @@ do
     return math.sqrt(dx*dx + dy*dy)
   end
 
-  local function listToSet(list)
-    local t = {}
-    for _,id in ipairs(list or {}) do t[id] = true end
-    return t
-  end
+  local function listComponentNodesFrom(startId)
+    if not (startId and nodes[startId]) then return {} end
+    buildChildren()
 
-  local function moveSubtreeByDelta(rootId, dx, dy, skipPinned, skipSet)
-    forEachDescendant(rootId, function(cid)
-      if not (skipSet and skipSet[cid]) then
-        local nn = nodes[cid]
-        if nn then
-          if not (skipPinned and nn.pinned == true) then
-            nn.worldx = (nn.worldx or 0) + dx
-            nn.worldy = (nn.worldy or 0) + dy
+    local out, seen = {}, {}
+    local q, qi = { startId }, 1
+    seen[startId] = true
+
+    while qi <= #q do
+      local id = q[qi]
+      qi = qi + 1
+      out[#out+1] = id
+
+      local n = nodes[id]
+      if n then
+        local pid = n.parent
+        if pid and nodes[pid] and not seen[pid] then
+          seen[pid] = true
+          q[#q+1] = pid
+        end
+        for _,cid in ipairs(n.children or {}) do
+          if nodes[cid] and not seen[cid] then
+            seen[cid] = true
+            q[#q+1] = cid
           end
         end
       end
-    end)
+    end
+
+    return out
   end
 
-  local function buildChainRootToNode(rootId, nodeId)
-    if not (rootId and nodeId and nodes[rootId] and nodes[nodeId]) then return nil end
-    local rev = {}
-    local cur = nodeId
-    while cur and nodes[cur] do
-      rev[#rev+1] = cur
-      if cur == rootId then break end
-      cur = nodes[cur].parent
-    end
-    if #rev == 0 or rev[#rev] ~= rootId then return nil end
-    local chain = {}
-    for i=#rev,1,-1 do chain[#chain+1] = rev[i] end
-    if #chain < 2 then return nil end
-    return chain
-  end
+  local function applyRightDragRopeIK(dragId, targetX, targetY, movedIds, baseWorld)
+    if not (dragId and nodes[dragId] and targetX and targetY) then return end
 
-  local function chooseDragPullRoot(dragId)
-    if not (dragId and nodes[dragId]) then return nil end
+    local restWorld = computeRestWorldPositions()
+    local componentIds = listComponentNodesFrom(dragId)
+    if #componentIds == 0 then return end
 
-    local child = dragId
-    while child and nodes[child] do
-      local parentId = nodes[child].parent
-      if not parentId or not nodes[parentId] then
-        return child
-      end
-
-      local parentN = nodes[parentId]
-      local childCount = #(parentN.children or {})
-      if parentN.pinned == true then
-        return child
-      end
-      if childCount > 1 then
-        return child
-      end
-
-      child = parentId
-    end
-
-    return dragId
-  end
-
-  local function solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
-    if not chain or #chain < 2 then return 0 end
-    local n = #chain
-    local pts = {}
-    local limits = {}
-
-    local function clampToMax(px, py, qx, qy, maxD)
-      local dx = qx - px
-      local dy = qy - py
-      local d = math.sqrt(dx*dx + dy*dy)
-      if d > maxD and d > 1e-9 then
-        local s = maxD / d
-        return px + dx*s, py + dy*s
-      end
-      return qx, qy
-    end
-
-    for i=1,n do
-      local nn = nodes[chain[i]]
-      pts[i] = { x = nn.worldx or 0, y = nn.worldy or 0 }
-      if i < n then
-        local R = restRangeToParent(chain[i+1], restWorld)
-        if not R or R <= 1e-9 then
-          local dx = pts[i+1].x - pts[i].x
-          local dy = pts[i+1].y - pts[i].y
-          R = math.sqrt(dx*dx + dy*dy)
-        end
-        limits[i] = R
-      end
-    end
-
-    local rootFixed = { x = pts[1].x, y = pts[1].y }
-
-    for _=1,10 do
-      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
-      for i=2,n do
-        local px, py = pts[i-1].x, pts[i-1].y
-        local qx, qy = pts[i].x, pts[i].y
-        qx, qy = clampToMax(px, py, qx, qy, limits[i-1])
-        pts[i].x, pts[i].y = qx, qy
-      end
-
-      pts[n].x, pts[n].y = targetX, targetY
-      for i=n-1,2,-1 do
-        local px, py = pts[i+1].x, pts[i+1].y
-        local qx, qy = pts[i].x, pts[i].y
-        qx, qy = clampToMax(px, py, qx, qy, limits[i])
-        pts[i].x, pts[i].y = qx, qy
-      end
-
-      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
-      for i=2,n do
-        local px, py = pts[i-1].x, pts[i-1].y
-        local qx, qy = pts[i].x, pts[i].y
-        qx, qy = clampToMax(px, py, qx, qy, limits[i-1])
-        pts[i].x, pts[i].y = qx, qy
-      end
-    end
-
-    local totalLen = 0
-    for i=1,n-1 do totalLen = totalLen + (limits[i] or 0) end
-    local dxrt = targetX - rootFixed.x
-    local dyrt = targetY - rootFixed.y
-    local dRootTarget = math.sqrt(dxrt*dxrt + dyrt*dyrt)
-    if totalLen > 1e-9 and dRootTarget >= totalLen * 0.95 and dRootTarget > 1e-9 then
-      local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
-      local acc = 0
-      pts[1].x, pts[1].y = rootFixed.x, rootFixed.y
-      for i=2,n do
-        acc = acc + (limits[i-1] or 0)
-        pts[i].x = rootFixed.x + ux * acc
-        pts[i].y = rootFixed.y + uy * acc
-      end
-      pts[n].x, pts[n].y = targetX, targetY
-    end
-
-    for i=1,n do
-      local nn = nodes[chain[i]]
-      if nn and nn.pinned ~= true then
-        nn.worldx, nn.worldy = pts[i].x, pts[i].y
-      end
-    end
-
-    local ex = pts[n].x - targetX
-    local ey = pts[n].y - targetY
-    return math.sqrt(ex*ex + ey*ey)
-  end
-
-  local function applyPinnedDescendantIK(movedRootId, movedIds, restWorld)
-    if not (movedRootId and nodes[movedRootId] and movedIds) then return end
-    for _,pidPinned in ipairs(movedIds) do
-      local pn = nodes[pidPinned]
-      if pn and pn.pinned == true and pidPinned ~= movedRootId then
-        local chain = buildChainRootToNode(movedRootId, pidPinned)
-        if chain then
-          local tx, ty = pn.worldx or 0, pn.worldy or 0
-          solveChainFixedRootTarget(chain, tx, ty, restWorld)
+    local edges = {}
+    for _,id in ipairs(componentIds) do
+      local n = nodes[id]
+      if n and n.parent and nodes[n.parent] then
+        local maxLen = restRangeToParent(id, restWorld)
+        if maxLen and maxLen > 1e-6 then
+          edges[#edges+1] = { a = n.parent, b = id, maxLen = maxLen }
         end
       end
     end
-  end
 
-  local function pullAncestorChainForDragged(dragId, movedIds, restWorld)
-    local n = nodes[dragId]
-    if not n then return end
-
-    local pullRootId = chooseDragPullRoot(dragId)
-    if not pullRootId then return end
-
-    local chain = buildChainRootToNode(pullRootId, dragId)
-    if not chain then return end
-    local chainSet = listToSet(chain)
-
-    local totalLen = 0
-    for i=1,#chain-1 do
-      local R = restRangeToParent(chain[i+1], restWorld)
-      if R and R > 1e-9 then totalLen = totalLen + R end
+    local draggedBase = baseWorld and baseWorld[dragId]
+    if draggedBase then
+      local dx = targetX - draggedBase.x
+      local dy = targetY - draggedBase.y
+      for _,id in ipairs(movedIds or {}) do
+        local n = nodes[id]
+        local b = baseWorld[id]
+        if n and b and n.pinned ~= true then
+          n.worldx = b.x + dx
+          n.worldy = b.y + dy
+        end
+      end
     end
 
-    local targetX = (nodes[dragId].worldx or 0)
-    local targetY = (nodes[dragId].worldy or 0)
+    local solverIterations = 30
+    local tautness = 0.9
 
-    solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+    for _=1,solverIterations do
+      local dragged = nodes[dragId]
+      if dragged then
+        dragged.worldx = targetX
+        dragged.worldy = targetY
+      end
 
-    local rootId = chain[1]
-    local rootN = nodes[rootId]
-    if not rootN then return end
+      for _,e in ipairs(edges) do
+        local a = nodes[e.a]
+        local b = nodes[e.b]
+        if a and b then
+          local ax, ay = a.worldx or 0, a.worldy or 0
+          local bx, by = b.worldx or 0, b.worldy or 0
+          local dx = bx - ax
+          local dy = by - ay
+          local d2 = dx*dx + dy*dy
+          local maxLen2 = e.maxLen * e.maxLen
 
-    local dxrt = targetX - (rootN.worldx or 0)
-    local dyrt = targetY - (rootN.worldy or 0)
-    local dRootTarget = math.sqrt(dxrt*dxrt + dyrt*dyrt)
-    if dRootTarget <= totalLen + 1e-6 then
-      return
-    end
+          if d2 > maxLen2 then
+            local d = math.sqrt(d2)
+            if d > 1e-9 then
+              local excess = (d - e.maxLen) * tautness
+              local ux, uy = dx / d, dy / d
 
-    if dRootTarget > 1e-9 and rootN.pinned ~= true then
-      local rem = dRootTarget - totalLen
-      local ux, uy = dxrt / dRootTarget, dyrt / dRootTarget
-      moveSubtreeByDelta(rootId, ux*rem, uy*rem, true, nil)
+              local aLocked = (e.a == dragId) or (a.pinned == true)
+              local bLocked = (e.b == dragId) or (b.pinned == true)
 
-      local childN = nodes[rootId]
-      if childN then
-        local pid = childN.parent
-        if pid and nodes[pid] then
-          local parentN = nodes[pid]
-          if parentN.pinned ~= true then
-            local R = restRangeToParent(rootId, restWorld)
-            if R and R > 1e-9 then
-              local vx = (childN.worldx or 0) - (parentN.worldx or 0)
-              local vy = (childN.worldy or 0) - (parentN.worldy or 0)
-              local d = math.sqrt(vx*vx + vy*vy)
-              if d > R + 1e-6 and d > 1e-9 then
-                local step = d - R
-                moveSubtreeByDelta(pid, (vx/d)*step, (vy/d)*step, true, chainSet)
+              if not aLocked and not bLocked then
+                local half = excess * 0.5
+                a.worldx = ax + ux * half
+                a.worldy = ay + uy * half
+                b.worldx = bx - ux * half
+                b.worldy = by - uy * half
+              elseif aLocked and not bLocked then
+                b.worldx = bx - ux * excess
+                b.worldy = by - uy * excess
+              elseif (not aLocked) and bLocked then
+                a.worldx = ax + ux * excess
+                a.worldy = ay + uy * excess
               end
             end
           end
         end
       end
+    end
 
-      solveChainFixedRootTarget(chain, targetX, targetY, restWorld)
+    local dragged = nodes[dragId]
+    if dragged then
+      dragged.worldx = targetX
+      dragged.worldy = targetY
     end
   end
 
-  -- NEW: when right-dragging (limit range, 2D), also enforce max-distance constraints
-  -- down the hierarchy so descendants get the same IK-like effect as ancestors.
-  local function pullDescendantsFromDragged(dragId, restWorld)
-    if not (dragId and nodes[dragId] and restWorld) then return end
-    buildChildren()
-
-    local function clampChildToParent(pid, cid)
-      local pn = nodes[pid]
-      local cn = nodes[cid]
-      if not pn or not cn then return end
-
-      local R = restRangeToParent(cid, restWorld)
-      if not R or R <= 1e-9 then return end
-
-      local dx = (cn.worldx or 0) - (pn.worldx or 0)
-      local dy = (cn.worldy or 0) - (pn.worldy or 0)
-      local d = math.sqrt(dx*dx + dy*dy)
-
-      if d > R + 1e-6 and d > 1e-9 then
-        if cn.pinned == true then
-          return
-        end
-        local s = R / d
-        local newX = (pn.worldx or 0) + dx * s
-        local newY = (pn.worldy or 0) + dy * s
-        local ddx = newX - (cn.worldx or 0)
-        local ddy = newY - (cn.worldy or 0)
-        moveSubtreeByDelta(cid, ddx, ddy, true, nil)
-      end
-    end
-
-    local function rec(pid)
-      local pn = nodes[pid]
-      if not pn then return end
-      for _,cid in ipairs(pn.children or {}) do
-        clampChildToParent(pid, cid)
-        rec(cid)
-      end
-    end
-
-    rec(dragId)
-  end
 
   build2DProximityOverlapMap = function(restWorld)
     local out = {}
@@ -2499,6 +2354,8 @@ do
       end
 
       local pe = math.max(0.0, tonumber(parentEffective) or 0.0)
+      -- Parent overlap should amplify child overlap without being hard-clamped
+      -- to [0,1], otherwise hierarchy influence can disappear visually.
       local effective = ownOverlap * (1.0 + pe)
 
       out[id] = effective
@@ -2553,6 +2410,7 @@ do
     local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
     local proximityBoost = base * (overlap * fovMul)
 
+    -- only increase final display radius, never decrease
     return currentR + proximityBoost
   end
 
@@ -3053,15 +2911,7 @@ do
         dW.z = 0
       end
 
-      -- NOTE: drag.subtreeIds remains the full subtree for other systems (pinned scan, etc.)
-      -- For RIGHT-drag IK, we only move the dragged vert directly (not the whole subtree),
-      -- then solve constraints both upward (ancestors) and downward (descendants).
-      local idsAll = drag.subtreeIds or { drag.id }
-      local idsMove = idsAll
-      if (drag.right and limit_range and (not view3d)) then
-        idsMove = { drag.id }
-      end
-
+      local ids = drag.subtreeIds or { drag.id }
       local unrestricted3dPose = (view3d and statePose and not (limit_range and n.parent and nodes[n.parent]))
       local targetRoot = nil
       if unrestricted3dPose then
@@ -3069,7 +2919,7 @@ do
       end
 
       local function translateSubtree(dx, dy)
-        for _,cid in ipairs(idsMove) do
+        for _,cid in ipairs(ids) do
           local b = base[cid]
           local nn = nodes[cid]
           if b and nn then
@@ -3193,67 +3043,45 @@ do
                   newRootY = (parentN.worldy or 0) + dyp*s
                 end
               end
-
               local dx = newRootX - baseRoot.x
               local dy = newRootY - baseRoot.y
-
-              translateSubtree(dx, dy)
-
               if (not view3d) and drag.right then
-                -- NEW: Right-drag constraint solves in BOTH directions
-                -- (ancestors already done; add descendants)
-                pullAncestorChainForDragged(drag.id, idsAll, restWorld)
-                pullDescendantsFromDragged(drag.id, restWorld)
-              end
-
-              if not view3d then
-                applyPinnedDescendantIK(drag.id, idsAll, restWorld)
+                applyRightDragRopeIK(drag.id, newRootX, newRootY, ids, base)
+              else
+                translateSubtree(dx, dy)
               end
             else
               local dx, dy = dW.x, dW.y
-              translateSubtree(dx, dy)
               if (not view3d) and drag.right then
-                local restWorld2 = computeRestWorldPositions()
-                pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
-                pullDescendantsFromDragged(drag.id, restWorld2)
-              end
-              if not view3d then
-                local restWorld2 = computeRestWorldPositions()
-                applyPinnedDescendantIK(drag.id, idsAll, restWorld2)
+                applyRightDragRopeIK(drag.id, baseRoot.x + dx, baseRoot.y + dy, ids, base)
+              else
+                translateSubtree(dx, dy)
               end
             end
           end
         else
-          translateSubtree(dW.x, dW.y)
-          if not view3d then
-            local restWorld2 = computeRestWorldPositions()
-            if drag.right then
-              pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
-              pullDescendantsFromDragged(drag.id, restWorld2)
-            end
-            applyPinnedDescendantIK(drag.id, idsAll, restWorld2)
+          if (not view3d) and drag.right then
+            applyRightDragRopeIK(drag.id, baseRoot.x + dW.x, baseRoot.y + dW.y, ids, base)
+          else
+            translateSubtree(dW.x, dW.y)
           end
         end
       else
         if targetRoot and baseRoot then
           local dx = targetRoot.x - baseRoot.x
           local dy = targetRoot.y - baseRoot.y
-          translateSubtree(dx, dy)
-          local restWorld2 = computeRestWorldPositions()
           if (not view3d) and drag.right then
-            pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
-            pullDescendantsFromDragged(drag.id, restWorld2)
+            applyRightDragRopeIK(drag.id, targetRoot.x, targetRoot.y, ids, base)
+          else
+            translateSubtree(dx, dy)
           end
-          if not view3d then applyPinnedDescendantIK(drag.id, idsAll, restWorld2) end
         else
           local dx, dy = dW.x, dW.y
-          translateSubtree(dx, dy)
-          local restWorld2 = computeRestWorldPositions()
           if (not view3d) and drag.right then
-            pullAncestorChainForDragged(drag.id, idsAll, restWorld2)
-            pullDescendantsFromDragged(drag.id, restWorld2)
+            applyRightDragRopeIK(drag.id, baseRoot.x + dx, baseRoot.y + dy, ids, base)
+          else
+            translateSubtree(dx, dy)
           end
-          if not view3d then applyPinnedDescendantIK(drag.id, idsAll, restWorld2) end
         end
       end
 
