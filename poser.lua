@@ -464,7 +464,7 @@ do
 
       mirror = nil,
 
-      prox_sign_2d = 1,
+      prox_sign_2d = 0,
 
       is_deform = false,
       deform_parent = nil,
@@ -574,6 +574,12 @@ do
 
   local function setLinkStateForSelection(on)
     local k = getSelectedGroupKey()
+    if not k then return end
+    if on == true then links[k] = true else links[k] = nil end
+  end
+
+  function setLinkStateForIds(ids, on)
+    local k = linkGroupKey(ids)
     if not k then return end
     if on == true then links[k] = true else links[k] = nil end
   end
@@ -1093,7 +1099,7 @@ do
   -- =========================
   -- drag state
   -- =========================
-  local depth_pref_bias = 1
+  local depth_pref_bias = 0
   local depth_pref_set = false
 
   local drag = {
@@ -1205,9 +1211,9 @@ do
       drag.baseSubtreeZpix = subtreeZpix
     end
     if view3d then
-      drag.depthBias = clamp(tonumber(depth_pref_bias) or 1, -1, 1)
+      drag.depthBias = clamp(tonumber(depth_pref_bias) or 0, -1, 1)
     else
-      local ns = (nodes[id] and tonumber(nodes[id].prox_sign_2d)) or 1
+      local ns = (nodes[id] and tonumber(nodes[id].prox_sign_2d)) or 0
       drag.depthBias = clamp(ns, -1, 1)
     end
     drag.right = (isRightDrag == true)
@@ -1341,7 +1347,7 @@ do
     n.pose_z3d = 0
     n.worldx, n.worldy = cx, cy
     n.pose_pos_set = false
-    n.prox_sign_2d = 1
+    n.prox_sign_2d = 0
 
     buildChildren()
     computeWorldFromActiveLocals()
@@ -1392,6 +1398,22 @@ do
 
     setSingleSelection(childId)
     return childId
+  end
+
+  function createNodeAtAndSelect(mx, my)
+    local wx, wy = clampToPad(mx, my)
+    local id = addNode(nil, 14)
+    local n = nodes[id]
+    n.rest_localx, n.rest_localy = wx, wy
+    n.pose_localx, n.pose_localy = wx, wy
+    n.pose_z2d = 0
+    n.pose_z3d = 0
+    n.pose_pos_set = false
+    n.prox_sign_2d = 0
+    buildChildren()
+    computeWorldFromActiveLocals()
+    setSingleSelection(id)
+    return id
   end
 
   local function createDeformBetweenSelected()
@@ -1527,6 +1549,41 @@ do
     computeWorldFromActiveLocals()
   end
 
+  function clearParentingForSelection()
+    if selectionCount() < 1 then return end
+    for _,id in ipairs(selectedList) do
+      local n = nodes[id]
+      if n then n.parent = nil end
+    end
+    buildChildren()
+    computeWorldFromActiveLocals()
+    computeActiveLocalsFromWorld()
+    computeWorldFromActiveLocals()
+  end
+
+  function clearLinksForSelection()
+    if selectionCount() < 1 then return end
+    local selectedSet = {}
+    for _,id in ipairs(selectedList) do selectedSet[tostring(id)] = true end
+    local newLinks = {}
+    for k,v in pairs(links) do
+      if v == true then
+        local ids = parseLinkGroupKey(k)
+        local drop = false
+        if ids then
+          for _,id in ipairs(ids) do
+            if selectedSet[tostring(id)] then drop = true break end
+          end
+          if not drop then
+            local nk = linkGroupKey(ids)
+            if nk then newLinks[nk] = true end
+          end
+        end
+      end
+    end
+    links = newLinks
+  end
+
   local function collectSubtreeIds(rootId, out)
     buildChildren()
     forEachDescendant(rootId, function(id) out[#out+1] = id end)
@@ -1565,7 +1622,7 @@ do
       nodes[nid].pose_z2d = s.pose_z2d or 0
       nodes[nid].pose_z3d = s.pose_z3d or 0
       nodes[nid].pose_pos_set = (s.pose_pos_set == true)
-      nodes[nid].prox_sign_2d = clamp(tonumber(s.prox_sign_2d) or 1, -1, 1)
+      nodes[nid].prox_sign_2d = clamp(tonumber(s.prox_sign_2d) or 0, -1, 1)
       nodes[nid].sphere = (s.sphere ~= false)
       nodes[nid].sphere_rot = (s.sphere_rot == true)
       nodes[nid].orient_lock = (s.orient_lock == true)
@@ -1710,9 +1767,10 @@ do
       local n = nodes[id]
       if n then
         clearMirrorFor(id)
+        local parentOfDeleted = n.parent
         for _,cid in ipairs(n.children) do
           local c = nodes[cid]
-          if c then c.parent = nil end
+          if c then c.parent = parentOfDeleted end
         end
       end
     end
@@ -1759,6 +1817,7 @@ do
     links = newLinks
 
     buildChildren()
+    computeActiveLocalsFromWorld()
     computeWorldFromActiveLocals()
 
     clearSelection()
@@ -2514,7 +2573,7 @@ do
       data["node_"..i.."_sphere_rot"] = (n.sphere_rot == true)
       data["node_"..i.."_pinned"] = (n.pinned == true)
       data["node_"..i.."_orient_lock"] = (n.orient_lock == true)
-      data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 1, -1, 1)
+      data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 0, -1, 1)
       data["node_"..i.."_is_deform"] = (n.is_deform == true)
       data["node_"..i.."_deform_parent"] = n.deform_parent or ""
       data["node_"..i.."_deform_descendant"] = n.deform_descendant or ""
@@ -2574,7 +2633,7 @@ do
     yaw = tonumber(t.cam_yaw) or 0.0
     pitch = clamp(tonumber(t.cam_pitch) or 0.0, -PITCH_MAX, PITCH_MAX)
     fov_deg = clamp(tonumber(t.cam_fov) or 60, 15, 140)
-    fov_2d = clamp(tonumber(t.fov_2d) or 60, 15, 140)
+    fov_2d = clamp(tonumber(t.fov_2d) or 60, 0, 140)
     res_scale = clamp(tonumber(t.res_scale) or 1.0, 0.1, 1.0)
     cam_dist = clamp(tonumber(t.cam_dist) or 420.0, CAM_DIST_MIN, CAM_DIST_MAX)
     pan.x = tonumber(t.cam_pan_x) or 0.0
@@ -2586,7 +2645,7 @@ do
     view2d.panx = tonumber(t.view2d_panx) or 0.0
     view2d.pany = tonumber(t.view2d_pany) or 0.0
 
-    depth_pref_bias = clamp(tonumber(t.depth_pref_bias) or tonumber(t.depth_pref_sign) or 1, -1, 1)
+    depth_pref_bias = clamp(tonumber(t.depth_pref_bias) or tonumber(t.depth_pref_sign) or 0, -1, 1)
     depth_pref_set = (t.depth_pref_set == true)
 
     local ncount = tonumber(t.node_count) or 0
@@ -2642,7 +2701,7 @@ do
         n.pinned = (t["node_"..i.."_pinned"] == true)
         n.orient_lock = (t["node_"..i.."_orient_lock"] == true)
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
-        if ps2d == nil then ps2d = 1 end
+        if ps2d == nil then ps2d = 0 end
         n.prox_sign_2d = clamp(ps2d, -1, 1)
 
         n.is_deform = (t["node_"..i.."_is_deform"] == true)
@@ -3225,15 +3284,15 @@ do
 
   getDepthBias2D = function(id)
     if id and nodes[id] then
-      return clamp(tonumber(nodes[id].prox_sign_2d) or 1, -1, 1)
+      return clamp(tonumber(nodes[id].prox_sign_2d) or 0, -1, 1)
     end
     if drag and drag.active then
       return clamp(tonumber(drag.depthBias) or 0, -1, 1)
     end
     if depth_pref_set then
-      return clamp(tonumber(depth_pref_bias) or 1, -1, 1)
+      return clamp(tonumber(depth_pref_bias) or 0, -1, 1)
     end
-    return 1
+    return 0
   end
 
   apply2DProximityRadiusBoost = function(id, n, base, currentR, restWorld, overlapMap)
@@ -3257,7 +3316,7 @@ do
       overlap = clamp(1.0 - (d / R), 0.0, 1.0) * getDepthBias2D(id)
     end
 
-    local fovMul = clamp(tonumber(fov_2d) or 60, 15, 140) / 100.0
+    local fovMul = clamp(tonumber(fov_2d) or 60, 0, 140) / 100.0
     local proximityBoost = base * (overlap * fovMul)
 
     return currentR + proximityBoost
@@ -3514,7 +3573,9 @@ do
       dlg:modify{ id="mode_add", visible=isRest }
       dlg:modify{ id="btn_parent", visible=isRest }
       dlg:modify{ id="btn_mirror", visible=isRest }
-      dlg:modify{ id="btn_delete", visible=isRest }
+      dlg:modify{ id="btn_delete", visible=true }
+      dlg:modify{ id="btn_clear_parenting", visible=isRest }
+      dlg:modify{ id="btn_clear_links", visible=isRest }
       dlg:modify{ id="btn_add_deform", visible=isRest, enabled=canCreateDeformFromSelection() }
       dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
@@ -3578,8 +3639,8 @@ do
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
       dlg:modify{ id="depth_alpha", selected=(depth_alpha==true) }
       dlg:modify{ id="fov", value=clamp(tonumber(fov_deg) or 60, 15, 140) }
-      dlg:modify{ id="fov_2d", value=clamp(tonumber(fov_2d) or 60, 15, 140) }
-      dlg:modify{ id="res_scale", value=math.floor(clamp((tonumber(res_scale) or 1.0) * 100, 10, 100) + 0.5) }
+      dlg:modify{ id="fov_2d", value=clamp(tonumber(fov_2d) or 60, 0, 140) }
+      dlg:modify{ id="res_scale", value=getResBlock() }
 
       updateControlsForState()
       updateControlsFor3D()
@@ -3606,24 +3667,25 @@ do
   dlg:slider{
     id="fov_2d",
     label="2D FOV",
-    min=15,
+    min=0,
     max=140,
     value=fov_2d,
     visible=true,
     onchange=function()
-      fov_2d = clamp(tonumber(dlg.data.fov_2d) or 60, 15, 140)
+      fov_2d = clamp(tonumber(dlg.data.fov_2d) or 60, 0, 140)
       refreshUI()
     end
   }
   dlg:slider{
     id="res_scale",
     label="res scale",
-    min=10,
-    max=100,
-    value=100,
+    min=1,
+    max=10,
+    value=1,
     visible=true,
     onchange=function()
-      res_scale = clamp((tonumber(dlg.data.res_scale) or 100) / 100.0, 0.1, 1.0)
+      local block = math.floor(clamp(tonumber(dlg.data.res_scale) or 1, 1, 10) + 0.5)
+      res_scale = 1.0 / block
       refreshUI()
     end
   }
@@ -3661,18 +3723,6 @@ do
     end
   }
   dlg:check{
-    id="mode_add",
-    text="add",
-    selected=false,
-    onclick=function()
-      setMode(dlg.data.mode_add == true, dlg)
-      refreshUI()
-    end
-  }
-
-  dlg:newrow()
-
-  dlg:check{
     id="view_3d",
     label="",
     text="3d",
@@ -3685,6 +3735,16 @@ do
       end
 
       updateControlsFor3D()
+      refreshUI()
+    end
+  }
+  dlg:check{
+    id="mode_add",
+    label="",
+    text="add",
+    selected=false,
+    onclick=function()
+      setMode(dlg.data.mode_add == true, dlg)
       refreshUI()
     end
   }
@@ -3704,7 +3764,6 @@ do
       refreshUI()
     end
   }
-
   dlg:check{
     id="depth_alpha",
     label="",
@@ -3739,7 +3798,7 @@ do
           local step = 0.1
           local deltaBias = (dy > 0) and -step or step
           if view3d then
-            local cur = clamp(tonumber(depth_pref_bias) or 1, -1, 1)
+            local cur = clamp(tonumber(depth_pref_bias) or 0, -1, 1)
             local b = clamp(cur + deltaBias, -1, 1)
             depth_pref_bias = b
             depth_pref_set = true
@@ -3747,7 +3806,7 @@ do
           else
             local dn = nodes[drag.id]
             if dn then
-              local cur = clamp(tonumber(dn.prox_sign_2d) or 1, -1, 1)
+              local cur = clamp(tonumber(dn.prox_sign_2d) or 0, -1, 1)
               local b = clamp(cur + deltaBias, -1, 1)
               dn.prox_sign_2d = b
               drag.depthBias = b
@@ -3808,6 +3867,20 @@ do
         end
 
         if not hit then
+          if modeAdd and stateRest and not sh then
+            local newId = createNodeAtAndSelect(mx, my)
+            updateLinkUI(dlg)
+            updateSphereUI(dlg)
+            updateDeformButtonUI()
+            if newId then
+              computeWorldFromActiveLocals()
+              local effZ2 = statePose and buildEffectiveZMap() or nil
+              local proj2 = buildProjectedMap(effZ2)
+              beginDrag(newId, mx, my, proj2, false)
+            end
+            refreshUI()
+            return
+          end
           if not sh then
             clearSelection()
             updateLinkUI(dlg)
@@ -3826,6 +3899,7 @@ do
         if modeAdd and stateRest then
           local newId = createChildAndDrag(hit, mx, my)
           if newId then
+            setLinkStateForIds({ hit, newId }, true)
             computeWorldFromActiveLocals()
             local effZ2 = statePose and buildEffectiveZMap() or nil
             local proj2 = buildProjectedMap(effZ2)
@@ -3924,7 +3998,7 @@ do
           local b = base[cid]
           local nn = nodes[cid]
           if b and nn then
-            if nn.pinned ~= true then
+            if (nn.pinned ~= true) or (cid == drag.id) then
               nn.worldx = b.x + dx
               nn.worldy = b.y + dy
             end
@@ -4119,6 +4193,18 @@ do
       refreshUI()
     end,
 
+    onkeydown=function(ev)
+      local key = string.lower(tostring(ev.key or ev.code or ev.scancode or ""))
+      local keycode = tonumber(ev.keyCode)
+      local isDelete = (key == "delete") or (key == "del") or (key == "backspace") or (keycode == 46) or (keycode == 8)
+      if not isDelete then return end
+      deleteSelectedButKeepChildren()
+      updateLinkUI(dlg)
+      updateSphereUI(dlg)
+      updateDeformButtonUI()
+      refreshUI()
+    end,
+
     onmouseup=function(ev)
       if btnIs(ev, "MIDDLE") then
         if viewPanDrag.active then endViewPan() end
@@ -4167,6 +4253,30 @@ do
       end
     end
   }
+
+  dlg:button{
+    id="btn_clear_parenting",
+    text="clear parenting",
+    onclick=function()
+      clearParentingForSelection()
+      updateLinkUI(dlg)
+      updateSphereUI(dlg)
+      updateDeformButtonUI()
+      refreshUI()
+    end
+  }
+
+  dlg:button{
+    id="btn_clear_links",
+    text="clear links",
+    onclick=function()
+      clearLinksForSelection()
+      updateLinkUI(dlg)
+      refreshUI()
+    end
+  }
+
+  dlg:newrow()
 
   dlg:button{
     id="btn_delete",
@@ -4332,12 +4442,12 @@ do
   dlg:modify{ id="depth_alpha", selected=false }
   depth_alpha = false
 
-  depth_pref_bias = 1
+  depth_pref_bias = 0
   depth_pref_set = false
 
   dlg:modify{ id="fov", value=fov_deg, visible=false }
   dlg:modify{ id="fov_2d", value=fov_2d, visible=true }
-  dlg:modify{ id="res_scale", value=100, visible=true }
+  dlg:modify{ id="res_scale", value=getResBlock(), visible=true }
 
   updateControlsForState()
   updateControlsFor3D()
