@@ -679,31 +679,24 @@ do
   -- =========================
   -- projection
   -- =========================
+  local buildEffective2DRadiusMap
+  local buildRadiusOffsetWorldMap2D
+
   local function buildProjectedMap(effZ)
     local proj = {}
 
     if not view3d then
-      local restWorld = nil
-      local overlapMap = nil
-      if statePose then
-        restWorld = computeRestWorldPositions()
-        overlapMap = build2DProximityOverlapMap(restWorld)
-      end
+      local radiusMap = buildEffective2DRadiusMap(effZ)
+      local offsetWorld = buildRadiusOffsetWorldMap2D(radiusMap)
       for _,id in ipairs(order) do
         local n = nodes[id]
         if n then
-          local base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX)
-          local ez = (statePose and effZ) and (tonumber(effZ[id]) or 0) or 0
-          local r = base
-          if statePose then
-            r = clamp(base + (base * (ez / 100.0)), 1, 400)
-            if n.parent and nodes[n.parent] and restWorld then
-              local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
-              if boosted then r = boosted end
-            end
-          end
-          local sx = cx + (n.worldx - cx) * view2d.zoom + view2d.panx
-          local sy = cy + (n.worldy - cy) * view2d.zoom + view2d.pany
+          local rr = radiusMap[id] or { base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX), r = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX) }
+          local base = rr.base
+          local r = rr.r
+          local ow = offsetWorld[id] or { x = n.worldx or 0, y = n.worldy or 0 }
+          local sx = cx + (ow.x - cx) * view2d.zoom + view2d.panx
+          local sy = cy + (ow.y - cy) * view2d.zoom + view2d.pany
           proj[id] = { x = sx, y = sy, r = r * view2d.zoom, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
         end
       end
@@ -750,28 +743,18 @@ do
     if (tonumber(res_scale) or 1.0) >= 0.999 then return fallbackProj end
 
     local proj = {}
-    local restWorld = nil
-    local overlapMap = nil
-    if statePose then
-      restWorld = computeRestWorldPositions()
-      overlapMap = build2DProximityOverlapMap(restWorld)
-    end
+    local radiusMap = buildEffective2DRadiusMap(effZ)
+    local offsetWorld = buildRadiusOffsetWorldMap2D(radiusMap)
 
     for _,id in ipairs(order) do
       local n = nodes[id]
       if n then
-        local base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX)
-        local ez = (statePose and effZ) and (tonumber(effZ[id]) or 0) or 0
-        local r = base
-        if statePose then
-          r = clamp(base + (base * (ez / 100.0)), 1, 400)
-          if n.parent and nodes[n.parent] and restWorld then
-            local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
-            if boosted then r = boosted end
-          end
-        end
-        local sx = n.worldx + view2d.panx
-        local sy = n.worldy + view2d.pany
+        local rr = radiusMap[id] or { base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX), r = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX) }
+        local base = rr.base
+        local r = rr.r
+        local ow = offsetWorld[id] or { x = n.worldx or 0, y = n.worldy or 0 }
+        local sx = ow.x + view2d.panx
+        local sy = ow.y + view2d.pany
         proj[id] = { x = sx, y = sy, r = r, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
       end
     end
@@ -1190,12 +1173,9 @@ do
   -- =========================
   -- Z / radius edits (MMB over selected)
   -- =========================
-  -- CHANGE: radius edits NEVER affect children (rest or pose). Z edits also only affect that vert.
-  local function applyRadiusRestSingle(id, delta)
-    local n = nodes[id]
-    if not n then return end
-    n.rest_r = clamp((tonumber(n.rest_r) or 14) + delta, 3, 200)
-  end
+  -- Radius edits in Rest push/pull direct child local origins; Z edits still affect only that vert.
+
+  local applyRadiusRestSingle
 
   local function applyPoseZSingle(id, deltaZ)
     local n = nodes[id]
@@ -2653,6 +2633,108 @@ do
 
     -- only increase final display radius, never decrease
     return currentR + proximityBoost
+  end
+
+
+  buildEffective2DRadiusMap = function(effZ)
+    local radii = {}
+    local restWorld = nil
+    local overlapMap = nil
+    if statePose then
+      restWorld = computeRestWorldPositions()
+      overlapMap = build2DProximityOverlapMap(restWorld)
+    end
+
+    for _,id in ipairs(order) do
+      local n = nodes[id]
+      if n then
+        local base = clamp(tonumber(n.rest_r) or 14, R_MIN, R_MAX)
+        local r = base
+        if statePose then
+          local ez = (effZ and (tonumber(effZ[id]) or 0)) or 0
+          r = clamp(base + (base * (ez / 100.0)), 1, 400)
+          if n.parent and nodes[n.parent] and restWorld then
+            local boosted = apply2DProximityRadiusBoost(id, n, base, r, restWorld, overlapMap)
+            if boosted then r = boosted end
+          end
+        end
+        radii[id] = { base = base, r = r }
+      end
+    end
+
+    return radii
+  end
+
+  buildRadiusOffsetWorldMap2D = function(radiusMap)
+    local out = {}
+    buildChildren()
+
+    local function rec(id)
+      local n = nodes[id]
+      if not n then return end
+
+      if not (n.parent and nodes[n.parent]) then
+        out[id] = { x = n.worldx or 0, y = n.worldy or 0 }
+      else
+        local p = nodes[n.parent]
+        local pp = out[n.parent]
+        if not pp then
+          rec(n.parent)
+          pp = out[n.parent]
+        end
+
+        local vx = (n.worldx or 0) - (p.worldx or 0)
+        local vy = (n.worldy or 0) - (p.worldy or 0)
+        local d = math.sqrt(vx*vx + vy*vy)
+
+        local shift = 0
+        local pr = radiusMap and radiusMap[n.parent]
+        if pr then shift = (tonumber(pr.r) or 0) - (tonumber(pr.base) or 0) end
+
+        if d > 1e-9 then
+          local ux, uy = vx / d, vy / d
+          out[id] = { x = pp.x + vx + ux * shift, y = pp.y + vy + uy * shift }
+        else
+          out[id] = { x = pp.x + vx, y = pp.y + vy }
+        end
+      end
+
+      for _,cid in ipairs(n.children or {}) do rec(cid) end
+    end
+
+    for _,rid in ipairs(roots) do rec(rid) end
+    return out
+  end
+
+  applyRadiusRestSingle = function(id, delta)
+    local n = nodes[id]
+    if not n then return end
+
+    local oldR = clamp(tonumber(n.rest_r) or 14, 3, 200)
+    local newR = clamp(oldR + delta, 3, 200)
+    local dR = newR - oldR
+    n.rest_r = newR
+
+    if math.abs(dR) <= 1e-9 then return end
+
+    buildChildren()
+    for _,cid in ipairs(n.children or {}) do
+      local c = nodes[cid]
+      if c then
+        local lx = tonumber(c.rest_localx) or 0
+        local ly = tonumber(c.rest_localy) or 0
+        local len = math.sqrt(lx*lx + ly*ly)
+        local ux, uy = 1, 0
+        if len > 1e-9 then ux, uy = lx/len, ly/len end
+        c.rest_localx = lx + ux * dR
+        c.rest_localy = ly + uy * dR
+
+        if c.pose_pos_set ~= true then
+          c.pose_localx = c.rest_localx
+          c.pose_localy = c.rest_localy
+        end
+      end
+    end
   end
 
   -- =========================
