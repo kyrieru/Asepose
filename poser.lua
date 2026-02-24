@@ -1006,6 +1006,7 @@ do
     subtreeIds=nil,
     baseWorld=nil,
     ropeComponentIds=nil,
+    ropeBaseWorld=nil,
 
     baseLocalZ=0,
     baseRootCamZ=0,
@@ -1060,6 +1061,7 @@ do
     drag.baseEffZ = nil
     drag.baseSubtreeZpix = nil
     drag.ropeComponentIds = nil
+    drag.ropeBaseWorld = nil
 
     if isRightDrag and (not view3d) then
       local comp, seen = {}, {}
@@ -1079,6 +1081,14 @@ do
         end
       end
       drag.ropeComponentIds = comp
+      local ropeBase = {}
+      for _,cid in ipairs(comp) do
+        local nn = nodes[cid]
+        if nn then
+          ropeBase[cid] = { x = nn.worldx or 0, y = nn.worldy or 0 }
+        end
+      end
+      drag.ropeBaseWorld = ropeBase
     end
 
     if statePose and view3d then
@@ -1112,6 +1122,7 @@ do
     drag.subtreeIds = nil
     drag.baseWorld = nil
     drag.ropeComponentIds = nil
+    drag.ropeBaseWorld = nil
     drag.baseLocalZ = 0
     drag.baseRootCamZ = 0
     drag.baseRootZpix = 0
@@ -3257,6 +3268,17 @@ do
         end
       end
 
+      local function resetRightDragRopeToBaseWorld()
+        if not ((not view3d) and drag.right and drag.ropeBaseWorld) then return end
+        for cid,bw in pairs(drag.ropeBaseWorld) do
+          local nn = nodes[cid]
+          if nn and bw then
+            nn.worldx = bw.x
+            nn.worldy = bw.y
+          end
+        end
+      end
+
       if limit_range and statePose and n.parent and nodes[n.parent] then
         buildChildren()
         local restWorld = computeRestWorldPositions()
@@ -3367,6 +3389,7 @@ do
               local dx = newRootX - baseRoot.x
               local dy = newRootY - baseRoot.y
               if (not view3d) and drag.right then
+                resetRightDragRopeToBaseWorld()
                 applyRightDragRopeIK(drag.id, newRootX, newRootY)
               else
                 translateSubtree(dx, dy)
@@ -3374,6 +3397,7 @@ do
             else
               local dx, dy = dW.x, dW.y
               if (not view3d) and drag.right then
+                resetRightDragRopeToBaseWorld()
                 applyRightDragRopeIK(drag.id, baseRoot.x + dx, baseRoot.y + dy)
               else
                 translateSubtree(dx, dy)
@@ -3382,6 +3406,7 @@ do
           end
         else
           if (not view3d) and drag.right then
+            resetRightDragRopeToBaseWorld()
             applyRightDragRopeIK(drag.id, baseRoot.x + dW.x, baseRoot.y + dW.y)
           else
             translateSubtree(dW.x, dW.y)
@@ -3392,6 +3417,7 @@ do
           local dx = targetRoot.x - baseRoot.x
           local dy = targetRoot.y - baseRoot.y
           if (not view3d) and drag.right then
+            resetRightDragRopeToBaseWorld()
             applyRightDragRopeIK(drag.id, targetRoot.x, targetRoot.y)
           else
             translateSubtree(dx, dy)
@@ -3399,6 +3425,7 @@ do
         else
           local dx, dy = dW.x, dW.y
           if (not view3d) and drag.right then
+            resetRightDragRopeToBaseWorld()
             applyRightDragRopeIK(drag.id, baseRoot.x + dx, baseRoot.y + dy)
           else
             translateSubtree(dx, dy)
