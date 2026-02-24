@@ -455,6 +455,7 @@ do
       pose_pos_set = false,
 
       sphere = true,
+      sphere_rot = false,
       pinned = false,
       orient_lock = false,
 
@@ -1378,6 +1379,8 @@ do
       nodes[nid].pose_z3d = s.pose_z3d or 0
       nodes[nid].pose_pos_set = (s.pose_pos_set == true)
       nodes[nid].prox_sign_2d = clamp(tonumber(s.prox_sign_2d) or 1, -1, 1)
+      nodes[nid].sphere = (s.sphere ~= false)
+      nodes[nid].sphere_rot = (s.sphere_rot == true)
       nodes[nid].orient_lock = (s.orient_lock == true)
     end
 
@@ -1711,6 +1714,28 @@ do
     end
   end
 
+  local function drawDirectionalCirclePolyline(gc, cx0, cy0, r, segments, ux, uy, axisScale)
+    if r < 1 then return end
+    local segs = math.max(12, tonumber(segments) or 52)
+    local s = clamp(tonumber(axisScale) or 1, 0, 1)
+    local d2 = (ux or 0)*(ux or 0) + (uy or 0)*(uy or 0)
+    if d2 < 1e-9 then ux, uy = 1, 0 else
+      local inv = 1 / math.sqrt(d2)
+      ux, uy = ux * inv, uy * inv
+    end
+    local px, py = -uy, ux
+    local lastx, lasty = nil, nil
+    for i=0,segs do
+      local a = (i / segs) * math.pi * 2
+      local ca = math.cos(a)
+      local sa = math.sin(a)
+      local x = cx0 + (ux * (ca * r * s)) + (px * (sa * r))
+      local y = cy0 + (uy * (ca * r * s)) + (py * (sa * r))
+      if lastx ~= nil then drawLineClipped(gc, lastx, lasty, x, y) end
+      lastx, lasty = x, y
+    end
+  end
+
   local function drawPixelStrong(img, x, y, pix)
     if not pix then return end
     if x < 0 or y < 0 or x >= img.width or y >= img.height then return end
@@ -1802,6 +1827,28 @@ do
     end
   end
 
+  local function drawDirectionalCirclePolylineToImage(img, cx0, cy0, r, segments, pix, ux, uy, axisScale)
+    if r < 1 then return end
+    local segs = math.max(12, tonumber(segments) or 52)
+    local s = clamp(tonumber(axisScale) or 1, 0, 1)
+    local d2 = (ux or 0)*(ux or 0) + (uy or 0)*(uy or 0)
+    if d2 < 1e-9 then ux, uy = 1, 0 else
+      local inv = 1 / math.sqrt(d2)
+      ux, uy = ux * inv, uy * inv
+    end
+    local px, py = -uy, ux
+    local lastx, lasty = nil, nil
+    for i=0,segs do
+      local a = (i / segs) * math.pi * 2
+      local ca = math.cos(a)
+      local sa = math.sin(a)
+      local x = cx0 + (ux * (ca * r * s)) + (px * (sa * r))
+      local y = cy0 + (uy * (ca * r * s)) + (py * (sa * r))
+      if lastx ~= nil then drawLineSet(img, lastx, lasty, x, y, pix) end
+      lastx, lasty = x, y
+    end
+  end
+
   local outerTangentSegment
 
   local function orderedGroupIdsForBoundary(ids, projRaster)
@@ -1833,12 +1880,68 @@ do
     return out
   end
 
+
+  local function buildSphereRotRenderMap(projRaster)
+    buildChildren()
+    local restWorld = computeRestWorldPositions()
+    local out = {}
+    for _,id in ipairs(order) do
+      local n = nodes[id]
+      if n and n.sphere_rot == true and n.children and #n.children > 0 then
+        local cId = nil
+        for _,cid in ipairs(n.children) do
+          if nodes[cid] and projRaster[cid] and projRaster[id] then
+            cId = cid
+            break
+          end
+        end
+        if cId then
+          local p0 = projRaster[id]
+          local p1 = projRaster[cId]
+          local dx = p1.x - p0.x
+          local dy = p1.y - p0.y
+          local d2 = dx*dx + dy*dy
+          local ux, uy = 1, 0
+          if d2 > 1e-9 then
+            local inv = 1 / math.sqrt(d2)
+            ux, uy = dx * inv, dy * inv
+          end
+
+          local rwC = restWorld[cId]
+          local rwP = restWorld[id]
+          local maxLen = 0
+          if rwC and rwP then
+            local rdx = rwC.x - rwP.x
+            local rdy = rwC.y - rwP.y
+            maxLen = math.sqrt(rdx*rdx + rdy*rdy)
+          end
+
+          local curLen = 0
+          if nodes[cId] and nodes[id] then
+            local cdx = (nodes[cId].worldx or 0) - (nodes[id].worldx or 0)
+            local cdy = (nodes[cId].worldy or 0) - (nodes[id].worldy or 0)
+            curLen = math.sqrt(cdx*cdx + cdy*cdy)
+          end
+
+          local axisScale = 1
+          if maxLen > 1e-9 then
+            axisScale = clamp(1.0 - (curLen / maxLen), 0, 1)
+          end
+
+          out[id] = { ux=ux, uy=uy, axisScale=axisScale }
+        end
+      end
+    end
+    return out
+  end
+
   local function renderVertsAndCirclesToImage()
     computeWorldFromActiveLocals()
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
     local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
+    local sphereRotMap = buildSphereRotRenderMap(projRaster)
 
     local img = Image(spr.width, spr.height, spr.colorMode)
     img:clear()
@@ -1893,7 +1996,12 @@ do
 
         local showSphere = (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false)
         if showSphere then
-          drawCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix)
+          local rot = sphereRotMap[id]
+          if rot then
+            drawDirectionalCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix, rot.ux, rot.uy, rot.axisScale)
+          else
+            drawCirclePolylineToImage(img, p.x, p.y, p.r, 52, pix)
+          end
         end
 
         local px = math.floor(pdot.x + 0.5)
@@ -2050,9 +2158,11 @@ do
     if not dlg then return end
     if lastSelected and nodes[lastSelected] then
       dlg:modify{ id="sphere_vert", enabled=true, selected=(nodes[lastSelected].sphere ~= false) }
+      dlg:modify{ id="sphere_rot", enabled=true, selected=(nodes[lastSelected].sphere_rot == true) }
       dlg:modify{ id="orient_lock", enabled=true, selected=(nodes[lastSelected].orient_lock == true) }
     else
       dlg:modify{ id="sphere_vert", enabled=false, selected=false }
+      dlg:modify{ id="sphere_rot", enabled=false, selected=false }
       dlg:modify{ id="orient_lock", enabled=false, selected=false }
     end
   end
@@ -2089,7 +2199,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 9
+    data["version"] = 10
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -2143,6 +2253,7 @@ do
       data["node_"..i.."_pose_z3d"] = n.pose_z3d or 0
       data["node_"..i.."_mirror"] = n.mirror or ""
       data["node_"..i.."_sphere"] = (n.sphere ~= false)
+      data["node_"..i.."_sphere_rot"] = (n.sphere_rot == true)
       data["node_"..i.."_pinned"] = (n.pinned == true)
       data["node_"..i.."_orient_lock"] = (n.orient_lock == true)
       data["node_"..i.."_prox_sign_2d"] = clamp(tonumber(n.prox_sign_2d) or 1, -1, 1)
@@ -2264,6 +2375,7 @@ do
         end
 
         n.sphere = (t["node_"..i.."_sphere"] ~= false)
+        n.sphere_rot = (t["node_"..i.."_sphere_rot"] == true)
         n.pinned = (t["node_"..i.."_pinned"] == true)
         n.orient_lock = (t["node_"..i.."_orient_lock"] == true)
         local ps2d = tonumber(t["node_"..i.."_prox_sign_2d"])
@@ -2996,6 +3108,7 @@ do
     local proj = buildProjectedMap(effZ)
     local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
+    local sphereRotMap = buildSphereRotRenderMap(projRaster)
 
     if view3d then draw3DFloorGrid(gc) end
 
@@ -3050,7 +3163,12 @@ do
 
         local showSphere = (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false)
         if showSphere then
-          drawCirclePolyline(gc, p.x, p.y, p.r, 52)
+          local rot = sphereRotMap[id]
+          if rot then
+            drawDirectionalCirclePolyline(gc, p.x, p.y, p.r, 52, rot.ux, rot.uy, rot.axisScale)
+          else
+            drawCirclePolyline(gc, p.x, p.y, p.r, 52)
+          end
         end
 
         local px = math.floor(pdot.x + 0.5)
@@ -3826,6 +3944,20 @@ do
     onclick=function()
       if lastSelected and nodes[lastSelected] then
         nodes[lastSelected].sphere = (dlg.data.sphere_vert == true)
+        refreshUI()
+      else
+        updateSphereUI(dlg)
+      end
+    end
+  }
+  dlg:check{
+    id="sphere_rot",
+    text="sphere rot",
+    selected=false,
+    enabled=false,
+    onclick=function()
+      if lastSelected and nodes[lastSelected] then
+        nodes[lastSelected].sphere_rot = (dlg.data.sphere_rot == true)
         refreshUI()
       else
         updateSphereUI(dlg)
