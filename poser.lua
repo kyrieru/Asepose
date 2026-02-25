@@ -54,7 +54,8 @@
 --
 -- Save / Load:
 --   - Saves ALL verts (rest+pose positions, rest radius, pose_z2d, pose_z3d), parents, mirror pairs, and link overrides.
---   - Saves also UI flags and 3D camera (yaw/pitch/fov/dist/pan) and display_spheres.
+--   - Saves also UI flags and 3D camera (yaw/pitch/fov/dist/pan), display_spheres,
+--     and interior shading settings.
 --   - When loading older files without z2d/z3d, legacy pose_z is mapped to BOTH.
 
 do
@@ -204,12 +205,14 @@ do
   -- =========================
   local view3d = false
   local display_spheres = true
+  shade_interiors = false
+  shade_color = Color{r=180,g=180,b=180,a=255}
   local order_alpha = false
   local depth_alpha = false
   local live_preview = false
 
-  local PREVIEW_NAME = "_PoserPreview"
-  local OUTPUT_NAME = "Poser Verts"
+  PREVIEW_NAME = "_PoserPreview"
+  OUTPUT_NAME = "Poser Verts"
 
   local VIEW_SENS = 0.010
   local PAN_SENS = 1.0
@@ -1986,6 +1989,26 @@ do
     end
   end
 
+  function drawFilledCircleGC(gc, cx0, cy0, r)
+    if r < 1 then return end
+    local block = getDrawBlock()
+    local lr = math.floor((r / block) + 0.5)
+    if lr < 1 then lr = 1 end
+    local lcx = math.floor((cx0 / block) + 0.5)
+    local lcy = math.floor((cy0 / block) + 0.5)
+
+    for y=-lr,lr do
+      local xx = math.floor(math.sqrt(math.max(0, (lr*lr) - (y*y))) + 0.5)
+      local x1 = lcx - xx
+      local x2 = lcx + xx
+      if block <= 1 then
+        gc:fillRect(Rectangle(x1, lcy + y, x2 - x1 + 1, 1))
+      else
+        gc:fillRect(Rectangle(x1 * block, (lcy + y) * block, (x2 - x1 + 1) * block, block))
+      end
+    end
+  end
+
   local function drawDirectionalCirclePolyline(gc, cx0, cy0, r, segments, ux, uy, axisScale)
     if r < 1 then return end
     local segs = math.max(12, tonumber(segments) or 52)
@@ -2099,6 +2122,211 @@ do
     end
   end
 
+  function drawFilledCircleToImage(img, cx0, cy0, r, pix)
+    if r < 1 then return end
+    local block = getDrawBlock()
+    local lr = math.floor((r / block) + 0.5)
+    if lr < 1 then lr = 1 end
+    local lcx = math.floor((cx0 / block) + 0.5)
+    local lcy = math.floor((cy0 / block) + 0.5)
+
+    for y=-lr,lr do
+      local xx = math.floor(math.sqrt(math.max(0, (lr*lr) - (y*y))) + 0.5)
+      for x=(lcx - xx),(lcx + xx) do
+        if block <= 1 then
+          drawPixelStrong(img, x, lcy + y, pix)
+        else
+          local gx = x * block
+          local gy = (lcy + y) * block
+          for oy=0,block-1 do
+            for ox=0,block-1 do
+              drawPixelStrong(img, gx + ox, gy + oy, pix)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  function colorToRGBA(c)
+    local r = clamp(math.floor(tonumber(c.red or c.r) or 0), 0, 255)
+    local g = clamp(math.floor(tonumber(c.green or c.g) or 0), 0, 255)
+    local b = clamp(math.floor(tonumber(c.blue or c.b) or 0), 0, 255)
+    local a = clamp(math.floor(tonumber(c.alpha or c.a) or 255), 0, 255)
+    return r, g, b, a
+  end
+
+  function shadeColorByBias(r, g, b, bias)
+    local f = 1.0 + (0.25 * clamp(tonumber(bias) or 0, -1, 1))
+    local rr = clamp(math.floor((r * f) + 0.5), 0, 255)
+    local gg = clamp(math.floor((g * f) + 0.5), 0, 255)
+    local bb = clamp(math.floor((b * f) + 0.5), 0, 255)
+    return rr, gg, bb
+  end
+
+  function sortLayerItems(items)
+    table.sort(items, function(a,b)
+      local ad = tonumber(a.depth)
+      local bd = tonumber(b.depth)
+      if ad ~= nil and bd ~= nil and ad ~= bd then
+        return ad > bd -- farther first, nearer last/on top
+      elseif ad ~= nil and bd == nil then
+        return false
+      elseif ad == nil and bd ~= nil then
+        return true
+      end
+      local aid = tonumber(a.id)
+      local bid = tonumber(b.id)
+      if aid ~= nil and bid ~= nil and aid ~= bid then return aid < bid end
+      local as = tostring(a.id or a.seq or "")
+      local bs = tostring(b.id or b.seq or "")
+      if as ~= bs then return as < bs end
+      return (a.seq or 0) < (b.seq or 0)
+    end)
+  end
+
+  function sortIdsByVisualDepth(baseOrder, proj)
+    local items = {}
+    for i,id in ipairs(baseOrder or {}) do
+      local p = proj and proj[id] or nil
+      local bias = clamp(tonumber(getDepthBias2D(id)) or 0, -1, 1)
+      local depth = (view3d and p and p.camZ) or bias
+      items[#items+1] = { id=id, depth=depth, seq=i }
+    end
+    sortLayerItems(items)
+    local out = {}
+    for i=1,#items do out[i] = items[i].id end
+    return out
+  end
+
+
+  function buildBridgeQuad(ax, ay, bx, by, ra, rb)
+    local r1 = math.max(0, tonumber(ra) or 0)
+    local r2 = math.max(0, tonumber(rb) or 0)
+    local dx = bx - ax
+    local dy = by - ay
+    local d2 = dx*dx + dy*dy
+    if d2 < 1e-9 then return nil end
+    local d = math.sqrt(d2)
+    local dr = r1 - r2
+    if d <= math.abs(dr) + 1e-6 then return nil end
+
+    local base = math.atan(dy, dx)
+    local c = clamp(dr / d, -1.0, 1.0)
+    local off = math.acos(c)
+
+    local t1 = base + off
+    local t2 = base - off
+
+    local ux1, uy1 = math.cos(t1), math.sin(t1)
+    local ux2, uy2 = math.cos(t2), math.sin(t2)
+
+    return {
+      { x=ax + ux1 * r1, y=ay + uy1 * r1 },
+      { x=bx + ux1 * r2, y=by + uy1 * r2 },
+      { x=bx + ux2 * r2, y=by + uy2 * r2 },
+      { x=ax + ux2 * r1, y=ay + uy2 * r1 },
+    }
+  end
+
+  function fillPolygonGC(gc, pts)
+    if not pts or #pts < 3 then return end
+    local block = getDrawBlock()
+    local lpts = {}
+    local miny, maxy =  1e9, -1e9
+    for i=1,#pts do
+      local lx = math.floor((pts[i].x / block) + 0.5)
+      local ly = math.floor((pts[i].y / block) + 0.5)
+      lpts[i] = { x=lx, y=ly }
+      if ly < miny then miny = ly end
+      if ly > maxy then maxy = ly end
+    end
+
+    local lowMaxY = math.floor((PAD_H - 1) / block)
+    local lowMaxX = math.floor((PAD_W - 1) / block)
+    local y0 = math.max(0, miny)
+    local y1 = math.min(lowMaxY, maxy)
+
+    for y=y0,y1 do
+      local scanY = y + 0.5
+      local xs = {}
+      for i=1,#lpts do
+        local a = lpts[i]
+        local b = lpts[(i % #lpts) + 1]
+        if (a.y <= scanY and b.y > scanY) or (b.y <= scanY and a.y > scanY) then
+          local t = (scanY - a.y) / (b.y - a.y)
+          xs[#xs+1] = a.x + (b.x - a.x) * t
+        end
+      end
+      table.sort(xs)
+      local i = 1
+      while i + 1 <= #xs do
+        local xL = math.max(0, math.floor(xs[i] + 0.5))
+        local xR = math.min(lowMaxX, math.floor(xs[i+1] + 0.5))
+        if xR >= xL then
+          if block <= 1 then
+            gc:fillRect(Rectangle(xL, y, xR - xL + 1, 1))
+          else
+            gc:fillRect(Rectangle(xL * block, y * block, (xR - xL + 1) * block, block))
+          end
+        end
+        i = i + 2
+      end
+    end
+  end
+
+  function fillPolygonToImage(img, pts, pix)
+    if not pts or #pts < 3 or not pix then return end
+    local block = getDrawBlock()
+    local lpts = {}
+    local miny, maxy =  1e9, -1e9
+    for i=1,#pts do
+      local lx = math.floor((pts[i].x / block) + 0.5)
+      local ly = math.floor((pts[i].y / block) + 0.5)
+      lpts[i] = { x=lx, y=ly }
+      if ly < miny then miny = ly end
+      if ly > maxy then maxy = ly end
+    end
+
+    local lowMaxY = math.floor((img.height - 1) / block)
+    local lowMaxX = math.floor((img.width - 1) / block)
+    local y0 = math.max(0, miny)
+    local y1 = math.min(lowMaxY, maxy)
+
+    for y=y0,y1 do
+      local scanY = y + 0.5
+      local xs = {}
+      for i=1,#lpts do
+        local a = lpts[i]
+        local b = lpts[(i % #lpts) + 1]
+        if (a.y <= scanY and b.y > scanY) or (b.y <= scanY and a.y > scanY) then
+          local t = (scanY - a.y) / (b.y - a.y)
+          xs[#xs+1] = a.x + (b.x - a.x) * t
+        end
+      end
+      table.sort(xs)
+      local i = 1
+      while i + 1 <= #xs do
+        local xL = math.max(0, math.floor(xs[i] + 0.5))
+        local xR = math.min(lowMaxX, math.floor(xs[i+1] + 0.5))
+        if block <= 1 then
+          for x=xL,xR do drawPixelStrong(img, x, y, pix) end
+        else
+          for x=xL,xR do
+            local gx = x * block
+            local gy = y * block
+            for oy=0,block-1 do
+              for ox=0,block-1 do
+                drawPixelStrong(img, gx + ox, gy + oy, pix)
+              end
+            end
+          end
+        end
+        i = i + 2
+      end
+    end
+  end
+
   local function drawDirectionalCirclePolylineToImage(img, cx0, cy0, r, segments, pix, ux, uy, axisScale)
     if r < 1 then return end
     local segs = math.max(12, tonumber(segments) or 52)
@@ -2120,8 +2348,6 @@ do
       lastx, lasty = x, y
     end
   end
-
-  local outerTangentSegment
 
   local function orderedGroupBoundaryEdges(ids, projRaster)
     local circles = {}
@@ -2260,10 +2486,13 @@ do
     local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
+    local sr, sg, sb, sa = colorToRGBA(shade_color)
 
     local img = Image(spr.width, spr.height, spr.colorMode)
     img:clear()
 
+    local linkGroups = {}
+    local linkShadeItems = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -2287,16 +2516,23 @@ do
               if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
             if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
-            for _,e in ipairs(edges) do
-              local pa, pb = projRaster[e.a], projRaster[e.b]
-              if pa and pb then
-                local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                local pix = app.pixelColor.rgba(0, 0, 0, aa)
-                if e.isPair == true then
-                  drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
-                else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy, groupCircles)
-                  if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
+            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles }
+
+            if shade_interiors then
+              for _,e in ipairs(edges) do
+                local pa, pb = projRaster[e.a], projRaster[e.b]
+                if pa and pb then
+                  local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+                  local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+                  if interiorA > 0 then
+                    local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+                    if quad then
+                      local bias = clamp(((getDepthBias2D(e.a) + getDepthBias2D(e.b)) * 0.5), -1, 1)
+                      local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or bias
+                      linkShadeItems[#linkShadeItems+1] = { id=(e.a .. ":" .. e.b), depth=depth, seq=#linkShadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                    end
+                  end
                 end
               end
             end
@@ -2305,7 +2541,60 @@ do
       end
     end
 
-    for _,id in ipairs(order) do
+    if shade_interiors then
+      sortLayerItems(linkShadeItems)
+      for i=1,#linkShadeItems do
+        local it = linkShadeItems[i]
+        local shadePix = app.pixelColor.rgba(it.r, it.g, it.b, it.a)
+        fillPolygonToImage(img, it.quad, shadePix)
+      end
+    end
+
+    for gi=1,#linkGroups do
+      local g = linkGroups[gi]
+      for _,e in ipairs(g.edges) do
+        local pa, pb = projRaster[e.a], projRaster[e.b]
+        if pa and pb then
+          local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+          local pix = app.pixelColor.rgba(0, 0, 0, aa)
+          if e.isPair == true then
+            drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
+          else
+            local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, g.cx0, g.cy0, e.ux, e.uy, g.circles)
+            if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
+          end
+        end
+      end
+    end
+
+    if shade_interiors then
+      local sphereShadeItems = {}
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      for _,id in ipairs(sphereDrawOrder) do
+        local p = projRaster[id]
+        local pdot = proj[id]
+        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
+          local aa = alphaMap[id] or 255
+          if selected[id] == true then aa = 255 end
+          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          if interiorA > 0 then
+            local bias = getDepthBias2D(id)
+            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local depth = (view3d and p and p.camZ) or bias
+            sphereShadeItems[#sphereShadeItems+1] = { id=id, depth=depth, seq=#sphereShadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+          end
+        end
+      end
+      sortLayerItems(sphereShadeItems)
+      for i=1,#sphereShadeItems do
+        local it = sphereShadeItems[i]
+        local shadePix = app.pixelColor.rgba(it.r, it.g, it.b, it.a)
+        drawFilledCircleToImage(img, it.p.x, it.p.y, it.p.r, shadePix)
+      end
+    end
+
+    local drawOrder = sortIdsByVisualDepth(order, proj)
+    for _,id in ipairs(drawOrder) do
       local p = projRaster[id]
       local pdot = proj[id]
       if p and pdot then
@@ -2573,7 +2862,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 11
+    data["version"] = 12
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -2584,6 +2873,14 @@ do
 
     data["view_3d"] = (view3d == true)
     data["display_spheres"] = (display_spheres == true)
+    data["shade_interiors"] = (shade_interiors == true)
+    do
+      local sr0, sg0, sb0, sa0 = colorToRGBA(shade_color)
+      data["shade_r"] = sr0
+      data["shade_g"] = sg0
+      data["shade_b"] = sb0
+      data["shade_a"] = sa0
+    end
     data["live"] = (live_preview == true)
     data["order_alpha"] = (order_alpha == true)
     data["depth_alpha"] = (depth_alpha == true)
@@ -2682,6 +2979,12 @@ do
 
     view3d = (t.view_3d == true)
     display_spheres = (t.display_spheres ~= false)
+    shade_interiors = (t.shade_interiors == true)
+    local loadR = clamp(tonumber(t.shade_r) or 180, 0, 255)
+    local loadG = clamp(tonumber(t.shade_g) or 180, 0, 255)
+    local loadB = clamp(tonumber(t.shade_b) or 180, 0, 255)
+    local loadA = clamp(tonumber(t.shade_a) or 255, 0, 255)
+    shade_color = Color{r=loadR,g=loadG,b=loadB,a=loadA}
     live_preview = (t.live == true)
     order_alpha = (t.order_alpha == true)
     depth_alpha = (t.depth_alpha == true)
@@ -3512,9 +3815,12 @@ do
     local projRaster = buildRasterProjectedMap(effZ, proj)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
+    local sr, sg, sb, sa = colorToRGBA(shade_color)
 
     if view3d then draw3DFloorGrid(gc) end
 
+    local linkGroups = {}
+    local linkShadeItems = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -3538,16 +3844,23 @@ do
               if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
             if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
-            for _,e in ipairs(edges) do
-              local pa, pb = projRaster[e.a], projRaster[e.b]
-              if pa and pb then
-                local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                gc.color = Color{r=0,g=0,b=0,a=aa}
-                if e.isPair == true then
-                  drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
-                else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy, groupCircles)
-                  if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
+            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles }
+
+            if shade_interiors then
+              for _,e in ipairs(edges) do
+                local pa, pb = projRaster[e.a], projRaster[e.b]
+                if pa and pb then
+                  local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+                  local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+                  if interiorA > 0 then
+                    local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+                    if quad then
+                      local bias = clamp(((getDepthBias2D(e.a) + getDepthBias2D(e.b)) * 0.5), -1, 1)
+                      local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or bias
+                      linkShadeItems[#linkShadeItems+1] = { id=(e.a .. ":" .. e.b), depth=depth, seq=#linkShadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                    end
+                  end
                 end
               end
             end
@@ -3556,7 +3869,60 @@ do
       end
     end
 
-    for _,id in ipairs(order) do
+    if shade_interiors then
+      sortLayerItems(linkShadeItems)
+      for i=1,#linkShadeItems do
+        local it = linkShadeItems[i]
+        gc.color = Color{r=it.r,g=it.g,b=it.b,a=it.a}
+        fillPolygonGC(gc, it.quad)
+      end
+    end
+
+    for gi=1,#linkGroups do
+      local g = linkGroups[gi]
+      for _,e in ipairs(g.edges) do
+        local pa, pb = projRaster[e.a], projRaster[e.b]
+        if pa and pb then
+          local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+          gc.color = Color{r=0,g=0,b=0,a=aa}
+          if e.isPair == true then
+            drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
+          else
+            local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, g.cx0, g.cy0, e.ux, e.uy, g.circles)
+            if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
+          end
+        end
+      end
+    end
+
+    if shade_interiors then
+      local sphereShadeItems = {}
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      for _,id in ipairs(sphereDrawOrder) do
+        local p = projRaster[id]
+        local pdot = proj[id]
+        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
+          local aa = alphaMap[id] or 255
+          if selected[id] == true then aa = 255 end
+          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          if interiorA > 0 then
+            local bias = getDepthBias2D(id)
+            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local depth = (view3d and p and p.camZ) or bias
+            sphereShadeItems[#sphereShadeItems+1] = { id=id, depth=depth, seq=#sphereShadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+          end
+        end
+      end
+      sortLayerItems(sphereShadeItems)
+      for i=1,#sphereShadeItems do
+        local it = sphereShadeItems[i]
+        gc.color = Color{r=it.r,g=it.g,b=it.b,a=it.a}
+        drawFilledCircleGC(gc, it.p.x, it.p.y, it.p.r)
+      end
+    end
+
+    local drawOrder = sortIdsByVisualDepth(order, proj)
+    for _,id in ipairs(drawOrder) do
       local p = projRaster[id]
       local pdot = proj[id]
       if p and pdot then
@@ -3705,6 +4071,8 @@ do
       dlg:modify{ id="mirror_mods", selected=(mirror_mods==true) }
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
+      dlg:modify{ id="shade_interiors", selected=(shade_interiors==true) }
+      dlg:modify{ id="shade_color", color=shade_color }
       updateSphereUI(dlg)
       dlg:modify{ id="live", selected=(live_preview==true) }
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
@@ -3847,6 +4215,26 @@ do
         order_alpha = false
         dlg:modify{ id="order_alpha", selected=false }
       end
+      refreshUI()
+    end
+  }
+
+  dlg:check{
+    id="shade_interiors",
+    label="",
+    text="shade interiors",
+    selected=false,
+    onclick=function()
+      shade_interiors = (dlg.data.shade_interiors == true)
+      refreshUI()
+    end
+  }
+  dlg:color{
+    id="shade_color",
+    label="shade color",
+    color=shade_color,
+    onchange=function()
+      shade_color = dlg.data.shade_color or shade_color
       refreshUI()
     end
   }
@@ -4503,6 +4891,12 @@ do
 
   dlg:modify{ id="view_3d", selected=false }
   view3d = false
+
+  dlg:modify{ id="shade_interiors", selected=false }
+  shade_interiors = false
+
+  shade_color = Color{r=180,g=180,b=180,a=255}
+  dlg:modify{ id="shade_color", color=shade_color }
 
   dlg:modify{ id="live", selected=false }
   live_preview = false
