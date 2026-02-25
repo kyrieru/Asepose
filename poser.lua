@@ -216,6 +216,7 @@ do
   local display_spheres = true
   shade_interiors = false
   shade_color = Color{r=180,g=180,b=180,a=255}
+  occluded_line_alpha_pct = 45
   local order_alpha = false
   local depth_alpha = false
   local live_preview = false
@@ -2312,6 +2313,28 @@ do
     return -snapBiasForVisualDepth(bias)
   end
 
+  function nearestFillDepth(items)
+    local near = nil
+    for i=1,#(items or {}) do
+      local d = tonumber(items[i] and items[i].depth)
+      if d ~= nil and ((near == nil) or (d < near)) then
+        near = d
+      end
+    end
+    return near
+  end
+
+  function fadeStrokeAlphaBehindFills(baseAlpha, strokeDepth, nearestDepth)
+    local a = clamp(math.floor(tonumber(baseAlpha) or 255), 0, 255)
+    local d = tonumber(strokeDepth)
+    if a <= 0 or d == nil or nearestDepth == nil then return a end
+    if d > (nearestDepth + 1e-6) then
+      local pct = clamp(tonumber(occluded_line_alpha_pct) or 45, 0, 100)
+      return clamp(math.floor(a * (pct / 100.0) + 0.5), 0, 255)
+    end
+    return a
+  end
+
 
   function buildBridgeQuad(ax, ay, bx, by, ra, rb)
     local r1 = math.max(0, tonumber(ra) or 0)
@@ -2685,12 +2708,17 @@ do
       end
     end
 
+    local nearestShadeDepth = shade_interiors and nearestFillDepth(shadeItems) or nil
+
     for gi=1,#linkGroups do
       local g = linkGroups[gi]
       for _,e in ipairs(g.edges) do
         local pa, pb = projRaster[e.a], projRaster[e.b]
         if pa and pb then
           local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+          local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
+          local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+          aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
           local pix = app.pixelColor.rgba(0, 0, 0, aa)
           if e.isPair == true then
             drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
@@ -2709,6 +2737,8 @@ do
       if p and pdot then
         local isSel = (selected[id] == true)
         local aa = alphaMap[id] or 255
+        local depth = (view3d and pdot.camZ) or get2DSortDepthFromBias(get2DFillDepthVisual(id, visualDepthMap))
+        aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
         local r, g, b = 0, 0, 0
         if isSel then r, g, b, aa = 60, 220, 60, 255 end
         local pix = app.pixelColor.rgba(r, g, b, aa)
@@ -2726,7 +2756,10 @@ do
         if not (statePose and isDeformNode(nodes[id])) then
           local px = math.floor(pdot.x + 0.5)
           local py = math.floor(pdot.y + 0.5)
-          drawPixelStrong(img, px, py, pix)
+          local dotA = aa
+          if (not isSel) and dotA < 128 then dotA = 128 end
+          local dotPix = app.pixelColor.rgba(r, g, b, dotA)
+          drawPixelStrong(img, px, py, dotPix)
         end
       end
     end
@@ -2971,7 +3004,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 12
+    data["version"] = 13
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -2983,6 +3016,7 @@ do
     data["view_3d"] = (view3d == true)
     data["display_spheres"] = (display_spheres == true)
     data["shade_interiors"] = (shade_interiors == true)
+    data["occluded_line_alpha_pct"] = clamp(math.floor((tonumber(occluded_line_alpha_pct) or 45) + 0.5), 0, 100)
     do
       local sr0, sg0, sb0, sa0 = colorToRGBA(shade_color)
       data["shade_r"] = sr0
@@ -3109,6 +3143,7 @@ do
     local loadB = clamp(tonumber(t.shade_b) or 180, 0, 255)
     local loadA = clamp(tonumber(t.shade_a) or 255, 0, 255)
     shade_color = Color{r=loadR,g=loadG,b=loadB,a=loadA}
+    occluded_line_alpha_pct = clamp(math.floor((tonumber(t.occluded_line_alpha_pct) or 45) + 0.5), 0, 100)
     live_preview = (t.live == true)
     order_alpha = (t.order_alpha == true)
     depth_alpha = (t.depth_alpha == true)
@@ -4086,12 +4121,17 @@ do
       end
     end
 
+    local nearestShadeDepth = shade_interiors and nearestFillDepth(shadeItems) or nil
+
     for gi=1,#linkGroups do
       local g = linkGroups[gi]
       for _,e in ipairs(g.edges) do
         local pa, pb = projRaster[e.a], projRaster[e.b]
         if pa and pb then
           local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
+          local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
+          local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+          aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
           gc.color = Color{r=0,g=0,b=0,a=aa}
           if e.isPair == true then
             drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
@@ -4111,6 +4151,8 @@ do
         local isSel = (selected[id] == true)
         local isPinned = (nodes[id] and nodes[id].pinned == true)
         local aa = alphaMap[id] or 255
+        local depth = (view3d and pdot.camZ) or get2DSortDepthFromBias(get2DFillDepthVisual(id, visualDepthMap))
+        aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
         if isSel then gc.color = Color{r=60,g=220,b=60,a=255}
         elseif isPinned then gc.color = Color{r=70,g=140,b=255,a=255}
         else gc.color = Color{r=0,g=0,b=0,a=aa} end
@@ -4133,7 +4175,9 @@ do
           elseif isPinned then
             gc.color = Color{r=70,g=140,b=255,a=255}
           else
-            gc.color = Color{r=0,g=0,b=0,a=aa}
+            local dotA = aa
+            if dotA < 128 then dotA = 128 end
+            gc.color = Color{r=0,g=0,b=0,a=dotA}
           end
           gc:fillRect(Rectangle(px-1, py-1, 3, 3))
         end
@@ -4258,6 +4302,7 @@ do
       dlg:modify{ id="view_3d", selected=(view3d==true) }
       dlg:modify{ id="shade_interiors", selected=(shade_interiors==true) }
       dlg:modify{ id="shade_color", color=shade_color }
+      dlg:modify{ id="occluded_line_alpha", value=clamp(math.floor((tonumber(occluded_line_alpha_pct) or 45) + 0.5), 0, 100) }
       updateSphereUI(dlg)
       dlg:modify{ id="live", selected=(live_preview==true) }
       dlg:modify{ id="order_alpha", selected=(order_alpha==true) }
@@ -4420,6 +4465,18 @@ do
     color=shade_color,
     onchange=function()
       shade_color = dlg.data.shade_color or shade_color
+      refreshUI()
+    end
+  }
+
+  dlg:slider{
+    id="occluded_line_alpha",
+    label="under fill %",
+    min=0,
+    max=100,
+    value=occluded_line_alpha_pct,
+    onchange=function()
+      occluded_line_alpha_pct = clamp(math.floor((tonumber(dlg.data.occluded_line_alpha) or 45) + 0.5), 0, 100)
       refreshUI()
     end
   }
@@ -5105,6 +5162,9 @@ do
 
   shade_color = Color{r=180,g=180,b=180,a=255}
   dlg:modify{ id="shade_color", color=shade_color }
+
+  occluded_line_alpha_pct = 45
+  dlg:modify{ id="occluded_line_alpha", value=occluded_line_alpha_pct }
 
   dlg:modify{ id="live", selected=false }
   live_preview = false
