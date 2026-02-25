@@ -449,6 +449,9 @@ do
   local selected = {}
   local selectedList = {}
   local lastSelected = nil
+  DOUBLE_CLICK_SECONDS = 0.35
+  lastLeftClickTime = -1
+  lastLeftClickId = nil
 
   DEFAULT_SHADE_RGBA = { r=180, g=180, b=180, a=255 }
 
@@ -624,6 +627,84 @@ do
     return ids
   end
 
+  function collectLinkedPairsWithinSelection(ids)
+    local pairsOut = {}
+    local seen = {}
+    if not ids or #ids < 2 then return pairsOut end
+
+    local selectedSet = {}
+    for _,id in ipairs(ids) do
+      selectedSet[tostring(id)] = true
+    end
+
+    for k,v in pairs(links or {}) do
+      if v == true then
+        local groupIds = parseLinkGroupKey(k)
+        if groupIds then
+          local shared = {}
+          for _,gid in ipairs(groupIds) do
+            if selectedSet[tostring(gid)] then
+              shared[#shared+1] = gid
+            end
+          end
+          for i=1,(#shared-1) do
+            for j=i+1,#shared do
+              local a = getRenderSourceId(shared[i])
+              local b = getRenderSourceId(shared[j])
+              local pk = linkPairKey2D(a, b)
+              if not seen[pk] then
+                seen[pk] = true
+                pairsOut[#pairsOut+1] = { a=a, b=b }
+              end
+            end
+          end
+        end
+      end
+    end
+
+    return pairsOut
+  end
+
+  function selectAllLinkedTo(id)
+    if not id or not nodes[id] then return false end
+    local gathered = { id }
+    local seen = { [tostring(id)] = true }
+
+    for k,v in pairs(links or {}) do
+      if v == true then
+        local groupIds = parseLinkGroupKey(k)
+        local containsId = false
+        if groupIds then
+          for _,gid in ipairs(groupIds) do
+            if tostring(gid) == tostring(id) then
+              containsId = true
+              break
+            end
+          end
+          if containsId then
+            for _,gid in ipairs(groupIds) do
+              local sid = tostring(gid)
+              if nodes[sid] and not seen[sid] then
+                seen[sid] = true
+                gathered[#gathered+1] = sid
+              end
+            end
+          end
+        end
+      end
+    end
+
+    selected = {}
+    selectedList = {}
+    lastSelected = nil
+    for _,sid in ipairs(gathered) do
+      selected[sid] = true
+      selectedList[#selectedList+1] = sid
+    end
+    lastSelected = id
+    return true
+  end
+
 
   function linkPairKey2D(a, b)
     local ia = tonumber(a) or 0
@@ -639,25 +720,16 @@ do
       setSingleSelection(lastSelected)
     end
 
-    local selectedKey = linkGroupKey(selectedList)
-    local applyToLinksOnly = (selectedKey ~= nil) and (links[selectedKey] == true)
+    local linkedPairs = collectLinkedPairsWithinSelection(selectedList)
 
-    if not applyToLinksOnly then
-      for _,id in ipairs(selectedList) do
-        local src = getRenderSourceId(id)
-        local n = nodes[src]
-        if n then n.prox_sign_2d = lv end
-      end
+    for _,id in ipairs(selectedList) do
+      local src = getRenderSourceId(id)
+      local n = nodes[src]
+      if n then n.prox_sign_2d = lv end
     end
 
-    if applyToLinksOnly then
-      for i=1,(#selectedList-1) do
-        local a = getRenderSourceId(selectedList[i])
-        for j=i+1,#selectedList do
-          local b = getRenderSourceId(selectedList[j])
-          link_depth_bias_2d[linkPairKey2D(a, b)] = lv
-        end
-      end
+    for _,pair in ipairs(linkedPairs) do
+      link_depth_bias_2d[linkPairKey2D(pair.a, pair.b)] = lv
     end
 
     if drag and drag.active then drag.depthBias = lv end
@@ -1129,6 +1201,7 @@ do
   -- =========================
   local modeAdd = false
   local mirror_mods = false
+  inverted_mirror = false
   local limit_range = false
 
   local function setMode(addOn, dlg)
@@ -1169,7 +1242,7 @@ do
     end
 
     local target_wx = mprx + (-vx)
-    local target_wy = mpry + ( vy)
+    local target_wy = mpry + ((inverted_mirror == true) and (-vy) or vy)
     target_wx, target_wy = clampToPad(target_wx, target_wy)
 
     local dx = target_wx - (mn.worldx or 0)
@@ -2443,29 +2516,36 @@ do
       setSingleSelection(lastSelected)
     end
 
-    local applyToLinksOnly = getLinkStateForSelection()
+    local linkedPairs = collectLinkedPairsWithinSelection(selectedList)
 
-    if not applyToLinksOnly then
-      for _,id in ipairs(selectedList) do
-        local src = getRenderSourceId(id)
-        node_shade_color[src] = copyRGBA(c)
+    for _,id in ipairs(selectedList) do
+      local src = getRenderSourceId(id)
+      node_shade_color[src] = copyRGBA(c)
+      if mirror_mods then
+        local m = nodes[id] and nodes[id].mirror
+        if m and nodes[m] then
+          node_shade_color[getRenderSourceId(m)] = copyRGBA(c)
+        end
       end
     end
 
-    if applyToLinksOnly then
-      for i=1,(#selectedList-1) do
-        local a = selectedList[i]
-        for j=i+1,#selectedList do
-          local b = selectedList[j]
-          link_shade_color_2d[linkColorKey2D(a, b)] = copyRGBA(c)
+    for _,pair in ipairs(linkedPairs) do
+      link_shade_color_2d[linkColorKey2D(pair.a, pair.b)] = copyRGBA(c)
+      if mirror_mods then
+        local ma = nodes[pair.a] and nodes[pair.a].mirror
+        local mb = nodes[pair.b] and nodes[pair.b].mirror
+        if ma and mb and nodes[ma] and nodes[mb] then
+          link_shade_color_2d[linkColorKey2D(ma, mb)] = copyRGBA(c)
         end
       end
     end
   end
 
   function getSelectionShadeColor()
-    if getLinkStateForSelection() then
-      return rgbaDataToColor(getLinkShadeRGBA(selectedList[1], selectedList[2]))
+    local linkedPairs = collectLinkedPairsWithinSelection(selectedList)
+    if #linkedPairs > 0 then
+      local p = linkedPairs[1]
+      return rgbaDataToColor(getLinkShadeRGBA(p.a, p.b))
     end
     local id = lastSelected or selectedList[1]
     if id and nodes[id] then
@@ -3192,6 +3272,7 @@ do
     data["version"] = 14
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
+    data["inverted_mirror"] = (inverted_mirror == true)
     data["limit_range"] = (limit_range == true)
 
     data["mode_add"] = (modeAdd == true)
@@ -3344,6 +3425,7 @@ do
     nextId = 1
 
     mirror_mods = (t.mirror_mods == true)
+    inverted_mirror = (t.inverted_mirror == true)
     limit_range = (t.limit_range == true)
 
     local legacyModeMove = (t.mode_move ~= false)
@@ -4550,6 +4632,7 @@ do
       setState(stateRest, statePose, dlg)
 
       dlg:modify{ id="mirror_mods", selected=(mirror_mods==true) }
+      dlg:modify{ id="inverted_mirror", selected=(inverted_mirror==true) }
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
       dlg:modify{ id="shade_interiors", selected=(shade_interiors==true) }
@@ -4853,6 +4936,26 @@ do
             updateDeformButtonUI()
             refreshUI()
           end
+          return
+        end
+
+        local isDoubleClick = false
+        if (not sh) and hit then
+          local now = os.clock()
+          isDoubleClick = (lastLeftClickId == hit) and (lastLeftClickTime >= 0) and ((now - lastLeftClickTime) <= DOUBLE_CLICK_SECONDS)
+          lastLeftClickTime = now
+          lastLeftClickId = hit
+        else
+          lastLeftClickTime = -1
+          lastLeftClickId = nil
+        end
+
+        if isDoubleClick then
+          selectAllLinkedTo(hit)
+          updateLinkUI(dlg)
+          updateSphereUI(dlg)
+          updateDeformButtonUI()
+          refreshUI()
           return
         end
 
@@ -5404,6 +5507,15 @@ do
       refreshUI()
     end
   }
+  dlg:check{
+    id="inverted_mirror",
+    text="inverted mirror",
+    selected=false,
+    onclick=function()
+      inverted_mirror = (dlg.data.inverted_mirror == true)
+      refreshUI()
+    end
+  }
 
   dlg:newrow()
 
@@ -5415,6 +5527,9 @@ do
 
   dlg:modify{ id="mirror_mods", selected=false }
   mirror_mods = false
+
+  dlg:modify{ id="inverted_mirror", selected=false }
+  inverted_mirror = false
 
   dlg:modify{ id="limit_range", selected=false }
   limit_range = false
