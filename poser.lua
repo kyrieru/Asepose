@@ -2271,6 +2271,15 @@ do
           local edges = orderedGroupBoundaryEdges(ids, projRaster)
           if edges then
             local cx0, cy0, ccount = 0, 0, 0
+            local groupCircles = {}
+            local seenCircle = {}
+            for _,id in ipairs(ids) do
+              local p0 = projRaster[id]
+              if p0 and not seenCircle[id] then
+                seenCircle[id] = true
+                groupCircles[#groupCircles+1] = { x=p0.x, y=p0.y, r=p0.r or 0 }
+              end
+            end
             for _,e in ipairs(edges) do
               local pa = projRaster[e.a]
               local pb = projRaster[e.b]
@@ -2286,7 +2295,7 @@ do
                 if e.isPair == true then
                   drawLineSet(img, pa.x, pa.y, pb.x, pb.y, pix)
                 else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy)
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy, groupCircles)
                   if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
                 end
               end
@@ -2373,7 +2382,7 @@ do
     side(-1)
   end
 
-  outerTangentSegment = function(ax, ay, bx, by, ra, rb, cx0, cy0, prefUx, prefUy)
+  outerTangentSegment = function(ax, ay, bx, by, ra, rb, cx0, cy0, prefUx, prefUy, groupCircles)
     local r1 = math.max(0, ra)
     local r2 = math.max(0, rb)
     local dx = bx - ax
@@ -2389,8 +2398,13 @@ do
     local off = math.acos(c)
 
     local best = nil
-    local pcx = (ax + bx) * 0.5
-    local pcy = (ay + by) * 0.5
+    local pd2 = (prefUx or 0)*(prefUx or 0) + (prefUy or 0)*(prefUy or 0)
+    local pux, puy = 0, 0
+    if pd2 > 1e-9 then
+      local invp = 1 / math.sqrt(pd2)
+      pux, puy = prefUx * invp, prefUy * invp
+    end
+
     for _,sign in ipairs({1, -1}) do
       local th = base + sign * off
       local ux = math.cos(th)
@@ -2401,25 +2415,55 @@ do
       local y2 = by + uy * r2
       local mx = (x1 + x2) * 0.5
       local my = (y1 + y2) * 0.5
-      local score
-      local pd2 = (prefUx or 0)*(prefUx or 0) + (prefUy or 0)*(prefUy or 0)
+
+      -- Candidate quality is based on how close this tangent is to being a true
+      -- support line for the WHOLE linked group. Inner tangents in close-circle
+      -- layouts are rejected because another circle has larger support on that side.
+      local k = x1 * ux + y1 * uy
+      local maxSupport = -math.huge
+      if groupCircles and #groupCircles > 0 then
+        for _,c0 in ipairs(groupCircles) do
+          local s0 = c0.x * ux + c0.y * uy + math.max(0, c0.r or 0)
+          if s0 > maxSupport then maxSupport = s0 end
+        end
+      else
+        maxSupport = math.max(ax * ux + ay * uy + r1, bx * ux + by * uy + r2)
+      end
+      local violation = math.max(0, maxSupport - k)
+
+      -- Reject candidates that run through any sphere interior.
+      local insidePenetration = 0.0
+      if groupCircles and #groupCircles > 0 then
+        for _,c0 in ipairs(groupCircles) do
+          local ddx = mx - c0.x
+          local ddy = my - c0.y
+          local md = math.sqrt(ddx*ddx + ddy*ddy)
+          local pen = (math.max(0, c0.r or 0) - md)
+          if pen > insidePenetration then insidePenetration = pen end
+        end
+      end
+
+      local score = -violation * 1000.0 - insidePenetration * 2000.0
       if pd2 > 1e-9 then
-        local invp = 1 / math.sqrt(pd2)
-        local pux = prefUx * invp
-        local puy = prefUy * invp
-        -- Compare side relative to this pair's center, not world origin.
-        -- Using absolute world coords here can make tangent selection flip based on
-        -- unrelated geometry position.
-        score = (mx - pcx) * pux + (my - pcy) * puy
+        score = score + (ux * pux + uy * puy)
       else
         local vx = mx - cx0
         local vy = my - cy0
-        score = vx*vx + vy*vy
+        score = score + (vx*vx + vy*vy) * 1e-3
       end
+
       if (not best) or score > best.score then
-        best = { x1=x1, y1=y1, x2=x2, y2=y2, score=score }
+        best = {
+          x1=x1, y1=y1, x2=x2, y2=y2,
+          score=score,
+          violation=violation,
+          insidePenetration=insidePenetration
+        }
       end
     end
+    -- If the best candidate is still significantly invalid, skip drawing it.
+    if best and (best.violation or 0) > 0.75 then return nil end
+    if best and (best.insidePenetration or 0) > 0.75 then return nil end
     return best
   end
 
@@ -3478,6 +3522,15 @@ do
           local edges = orderedGroupBoundaryEdges(ids, projRaster)
           if edges then
             local cx0, cy0, ccount = 0, 0, 0
+            local groupCircles = {}
+            local seenCircle = {}
+            for _,id in ipairs(ids) do
+              local p0 = projRaster[id]
+              if p0 and not seenCircle[id] then
+                seenCircle[id] = true
+                groupCircles[#groupCircles+1] = { x=p0.x, y=p0.y, r=p0.r or 0 }
+              end
+            end
             for _,e in ipairs(edges) do
               local pa = projRaster[e.a]
               local pb = projRaster[e.b]
@@ -3493,7 +3546,7 @@ do
                 if e.isPair == true then
                   drawDoubleCircleLink(gc, pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                 else
-                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy)
+                  local seg = outerTangentSegment(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r, cx0, cy0, e.ux, e.uy, groupCircles)
                   if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
                 end
               end
