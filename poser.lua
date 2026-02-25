@@ -2389,6 +2389,8 @@ do
     local off = math.acos(c)
 
     local best = nil
+    local pcx = (ax + bx) * 0.5
+    local pcy = (ay + by) * 0.5
     for _,sign in ipairs({1, -1}) do
       local th = base + sign * off
       local ux = math.cos(th)
@@ -2405,7 +2407,10 @@ do
         local invp = 1 / math.sqrt(pd2)
         local pux = prefUx * invp
         local puy = prefUy * invp
-        score = mx * pux + my * puy
+        -- Compare side relative to this pair's center, not world origin.
+        -- Using absolute world coords here can make tangent selection flip based on
+        -- unrelated geometry position.
+        score = (mx - pcx) * pux + (my - pcy) * puy
       else
         local vx = mx - cx0
         local vy = my - cy0
