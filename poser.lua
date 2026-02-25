@@ -639,16 +639,21 @@ do
       setSingleSelection(lastSelected)
     end
 
-    for _,id in ipairs(selectedList) do
-      local src = getRenderSourceId(id)
-      local n = nodes[src]
-      if n then n.prox_sign_2d = lv end
+    local selectedKey = linkGroupKey(selectedList)
+    local applyToLinksOnly = (selectedKey ~= nil) and (links[selectedKey] == true)
+
+    if not applyToLinksOnly then
+      for _,id in ipairs(selectedList) do
+        local src = getRenderSourceId(id)
+        local n = nodes[src]
+        if n then n.prox_sign_2d = lv end
+      end
     end
 
-    if #selectedList >= 2 then
+    if applyToLinksOnly then
       for i=1,(#selectedList-1) do
-          local a = getRenderSourceId(selectedList[i])
-          for j=i+1,#selectedList do
+        local a = getRenderSourceId(selectedList[i])
+        for j=i+1,#selectedList do
           local b = getRenderSourceId(selectedList[j])
           link_depth_bias_2d[linkPairKey2D(a, b)] = lv
         end
@@ -2313,6 +2318,10 @@ do
       elseif ad == nil and bd ~= nil then
         return true
       end
+      if a.kind ~= b.kind then
+        if a.kind == "quad" and b.kind == "circle" then return true end
+        if a.kind == "circle" and b.kind == "quad" then return false end
+      end
       local aid = tonumber(a.id)
       local bid = tonumber(b.id)
       if aid ~= nil and bid ~= nil and aid ~= bid then return aid < bid end
@@ -2434,12 +2443,16 @@ do
       setSingleSelection(lastSelected)
     end
 
-    for _,id in ipairs(selectedList) do
-      local src = getRenderSourceId(id)
-      node_shade_color[src] = copyRGBA(c)
+    local applyToLinksOnly = getLinkStateForSelection()
+
+    if not applyToLinksOnly then
+      for _,id in ipairs(selectedList) do
+        local src = getRenderSourceId(id)
+        node_shade_color[src] = copyRGBA(c)
+      end
     end
 
-    if #selectedList >= 2 then
+    if applyToLinksOnly then
       for i=1,(#selectedList-1) do
         local a = selectedList[i]
         for j=i+1,#selectedList do
@@ -2451,7 +2464,7 @@ do
   end
 
   function getSelectionShadeColor()
-    if #selectedList >= 2 then
+    if getLinkStateForSelection() then
       return rgbaDataToColor(getLinkShadeRGBA(selectedList[1], selectedList[2]))
     end
     local id = lastSelected or selectedList[1]
