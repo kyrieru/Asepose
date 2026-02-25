@@ -475,6 +475,12 @@ do
     return Color{r=k.r, g=k.g, b=k.b, a=k.a}
   end
 
+  local function rgbaEqual(a, b)
+    local ca = copyRGBA(a)
+    local cb = copyRGBA(b)
+    return (ca.r == cb.r) and (ca.g == cb.g) and (ca.b == cb.b) and (ca.a == cb.a)
+  end
+
   function getRenderSourceId(id)
     local n = nodes[id]
     if n
@@ -3101,6 +3107,8 @@ do
   -- =========================
   -- UI: link checkbox sync
   -- =========================
+  local suppressShadeColorOnChange = false
+
   local function updateLinkUI(dlg)
     if not dlg then return end
     if #selectedList >= 2 then
@@ -3108,7 +3116,17 @@ do
     else
       dlg:modify{ id="link_pair", enabled=false, selected=false }
     end
-    dlg:modify{ id="shade_color", color=getSelectionShadeColor() }
+
+    local selColor = getSelectionShadeColor()
+    local selRGBA = colorToRGBAData(selColor)
+    local uiRGBA = colorToRGBAData(dlg.data and dlg.data.shade_color)
+    if not rgbaEqual(selRGBA, uiRGBA) then
+      suppressShadeColorOnChange = true
+      dlg:modify{ id="shade_color", color=selColor }
+      suppressShadeColorOnChange = false
+    end
+
+    shade_color = selColor
   end
 
   local function updateSphereUI(dlg)
@@ -4695,6 +4713,7 @@ do
     label="shade color",
     color=getSelectionShadeColor(),
     onchange=function()
+      if suppressShadeColorOnChange then return end
       local c = dlg.data.shade_color or getSelectionShadeColor()
       shade_color = c
       setShadeColorForSelection(c)
