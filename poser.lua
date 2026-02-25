@@ -1216,7 +1216,7 @@ do
   -- =========================
   local function applyMirrorMoveFromWorld(id)
     local n = nodes[id]
-    if not n or not mirror_mods then return end
+    if not n or (not mirror_mods and not inverted_mirror) then return end
     local mid = n.mirror
     if not mid or not nodes[mid] then return end
     local mn = nodes[mid]
