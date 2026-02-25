@@ -3280,7 +3280,12 @@ do
       end
 
       local pe = tonumber(parentEffective) or 0.0
-      local effective = pe + (ownOverlap * getDepthBias2D(id))
+      local bias = getDepthBias2D(id)
+      local effective = pe + (ownOverlap * bias)
+      if bias < 0 then
+        effective = effective + ((1.0 - ownOverlap) * bias)
+      end
+      effective = math.max(0.0, effective)
 
       out[id] = effective
       for _,cid in ipairs(n.children or {}) do
@@ -3808,7 +3813,7 @@ do
 
       if drag.active and drag.id then
         if statePose then
-          local step = 0.1
+          local step = 0.2
           local deltaBias = (dy > 0) and -step or step
           if view3d then
             local cur = clamp(tonumber(depth_pref_bias) or 0, -1, 1)
