@@ -779,6 +779,7 @@ do
   local apply2DProximityRadiusBoost
   local build2DProximityOverlapMap
   local build2DVisualDepthRawMap
+  local compute2DDepthRaw
 
   -- =========================
   -- projection
@@ -2174,7 +2175,8 @@ do
   end
 
   function shadeColorByBias(r, g, b, bias)
-    local f = 1.0 + (0.25 * clamp(tonumber(bias) or 0, -1, 1))
+    local b01 = clamp(tonumber(bias) or 0, -1, 1)
+    local f = 1.1 + (0.9 * b01) -- -1 => 0.2 (much darker), +1 => 2.0 (toward white)
     local rr = clamp(math.floor((r * f) + 0.5), 0, 255)
     local gg = clamp(math.floor((g * f) + 0.5), 0, 255)
     local bb = clamp(math.floor((b * f) + 0.5), 0, 255)
@@ -3693,6 +3695,20 @@ do
 
 
 
+  compute2DDepthRaw = function(parentEffective, ownOverlap, bias)
+    local pe = tonumber(parentEffective) or 0.0
+    local ov = clamp(tonumber(ownOverlap) or 0.0, 0.0, 1.0)
+    local bz = clamp(tonumber(bias) or 0.0, -1.0, 1.0)
+
+    -- Baseline positive overlap contribution plus bias-weighted variation.
+    -- This ensures overlap can still build positive 2D depth even when biases match.
+    local raw = pe + (ov * 0.5) + (ov * bz)
+    if bz < 0 then
+      raw = raw + ((1.0 - ov) * bz)
+    end
+    return raw
+  end
+
   build2DProximityOverlapMap = function(restWorld)
     local out = {}
     if not restWorld then return out end
@@ -3715,13 +3731,9 @@ do
         end
       end
 
-      local pe = tonumber(parentEffective) or 0.0
       local bias = get2DFillDepth(id)
-      local effective = pe + (ownOverlap * bias)
-      if bias < 0 then
-        effective = effective + ((1.0 - ownOverlap) * bias)
-      end
-      effective = math.max(0.0, effective)
+      local raw = compute2DDepthRaw(parentEffective, ownOverlap, bias)
+      local effective = math.max(0.0, raw)
 
       out[id] = effective
       for _,cid in ipairs(n.children or {}) do
@@ -3759,12 +3771,8 @@ do
         end
       end
 
-      local pe = tonumber(parentEffective) or 0.0
       local bias = get2DFillDepth(id)
-      local raw = pe + (ownOverlap * bias)
-      if bias < 0 then
-        raw = raw + ((1.0 - ownOverlap) * bias)
-      end
+      local raw = compute2DDepthRaw(parentEffective, ownOverlap, bias)
 
       out[id] = raw
       local effective = math.max(0.0, raw)
