@@ -2189,14 +2189,31 @@ do
     local items = {}
     for i,id in ipairs(baseOrder or {}) do
       local p = proj and proj[id] or nil
-      local bias = clamp(tonumber(getDepthBias2D(id)) or 0, -1, 1)
-      local depth = (view3d and p and p.camZ) or bias
+      local depth = nil
+      if view3d then
+        depth = p and p.camZ
+      else
+        depth = get2DSortDepthFromBias(get2DFillDepth(id))
+      end
       items[#items+1] = { id=id, depth=depth, seq=i }
     end
     sortLayerItems(items)
     local out = {}
     for i=1,#items do out[i] = items[i].id end
     return out
+  end
+
+  function get2DFillDepth(id)
+    local n = nodes[id]
+    return clamp(tonumber(n and n.prox_sign_2d) or 0, -1, 1)
+  end
+
+  function get2DLinkFillDepth(a, b)
+    return clamp((get2DFillDepth(a) + get2DFillDepth(b)) * 0.5, -1, 1)
+  end
+
+  function get2DSortDepthFromBias(bias)
+    return -clamp(tonumber(bias) or 0, -1, 1)
   end
 
 
@@ -2492,7 +2509,7 @@ do
     img:clear()
 
     local linkGroups = {}
-    local linkShadeItems = {}
+    local shadeItems = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -2527,10 +2544,10 @@ do
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = clamp(((getDepthBias2D(e.a) + getDepthBias2D(e.b)) * 0.5), -1, 1)
+                      local bias = get2DLinkFillDepth(e.a, e.b)
                       local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
-                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or bias
-                      linkShadeItems[#linkShadeItems+1] = { id=(e.a .. ":" .. e.b), depth=depth, seq=#linkShadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+                      shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
                     end
                   end
                 end
@@ -2542,11 +2559,32 @@ do
     end
 
     if shade_interiors then
-      sortLayerItems(linkShadeItems)
-      for i=1,#linkShadeItems do
-        local it = linkShadeItems[i]
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      for _,id in ipairs(sphereDrawOrder) do
+        local p = projRaster[id]
+        local pdot = proj[id]
+        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
+          local aa = alphaMap[id] or 255
+          if selected[id] == true then aa = 255 end
+          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          if interiorA > 0 then
+            local bias = get2DFillDepth(id)
+            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
+            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+          end
+        end
+      end
+
+      sortLayerItems(shadeItems)
+      for i=1,#shadeItems do
+        local it = shadeItems[i]
         local shadePix = app.pixelColor.rgba(it.r, it.g, it.b, it.a)
-        fillPolygonToImage(img, it.quad, shadePix)
+        if it.kind == "quad" then
+          fillPolygonToImage(img, it.quad, shadePix)
+        else
+          drawFilledCircleToImage(img, it.p.x, it.p.y, it.p.r, shadePix)
+        end
       end
     end
 
@@ -2564,32 +2602,6 @@ do
             if seg then drawLineSet(img, seg.x1, seg.y1, seg.x2, seg.y2, pix) end
           end
         end
-      end
-    end
-
-    if shade_interiors then
-      local sphereShadeItems = {}
-      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
-      for _,id in ipairs(sphereDrawOrder) do
-        local p = projRaster[id]
-        local pdot = proj[id]
-        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
-          local aa = alphaMap[id] or 255
-          if selected[id] == true then aa = 255 end
-          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
-          if interiorA > 0 then
-            local bias = getDepthBias2D(id)
-            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
-            local depth = (view3d and p and p.camZ) or bias
-            sphereShadeItems[#sphereShadeItems+1] = { id=id, depth=depth, seq=#sphereShadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
-          end
-        end
-      end
-      sortLayerItems(sphereShadeItems)
-      for i=1,#sphereShadeItems do
-        local it = sphereShadeItems[i]
-        local shadePix = app.pixelColor.rgba(it.r, it.g, it.b, it.a)
-        drawFilledCircleToImage(img, it.p.x, it.p.y, it.p.r, shadePix)
       end
     end
 
@@ -3627,7 +3639,7 @@ do
       end
 
       local pe = tonumber(parentEffective) or 0.0
-      local bias = getDepthBias2D(id)
+      local bias = get2DFillDepth(id)
       local effective = pe + (ownOverlap * bias)
       if bias < 0 then
         effective = effective + ((1.0 - ownOverlap) * bias)
@@ -3820,7 +3832,7 @@ do
     if view3d then draw3DFloorGrid(gc) end
 
     local linkGroups = {}
-    local linkShadeItems = {}
+    local shadeItems = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -3855,10 +3867,10 @@ do
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = clamp(((getDepthBias2D(e.a) + getDepthBias2D(e.b)) * 0.5), -1, 1)
+                      local bias = get2DLinkFillDepth(e.a, e.b)
                       local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
-                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or bias
-                      linkShadeItems[#linkShadeItems+1] = { id=(e.a .. ":" .. e.b), depth=depth, seq=#linkShadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+                      shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
                     end
                   end
                 end
@@ -3870,11 +3882,32 @@ do
     end
 
     if shade_interiors then
-      sortLayerItems(linkShadeItems)
-      for i=1,#linkShadeItems do
-        local it = linkShadeItems[i]
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      for _,id in ipairs(sphereDrawOrder) do
+        local p = projRaster[id]
+        local pdot = proj[id]
+        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
+          local aa = alphaMap[id] or 255
+          if selected[id] == true then aa = 255 end
+          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          if interiorA > 0 then
+            local bias = get2DFillDepth(id)
+            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
+            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+          end
+        end
+      end
+
+      sortLayerItems(shadeItems)
+      for i=1,#shadeItems do
+        local it = shadeItems[i]
         gc.color = Color{r=it.r,g=it.g,b=it.b,a=it.a}
-        fillPolygonGC(gc, it.quad)
+        if it.kind == "quad" then
+          fillPolygonGC(gc, it.quad)
+        else
+          drawFilledCircleGC(gc, it.p.x, it.p.y, it.p.r)
+        end
       end
     end
 
@@ -3892,32 +3925,6 @@ do
             if seg then drawLineClipped(gc, seg.x1, seg.y1, seg.x2, seg.y2) end
           end
         end
-      end
-    end
-
-    if shade_interiors then
-      local sphereShadeItems = {}
-      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
-      for _,id in ipairs(sphereDrawOrder) do
-        local p = projRaster[id]
-        local pdot = proj[id]
-        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
-          local aa = alphaMap[id] or 255
-          if selected[id] == true then aa = 255 end
-          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
-          if interiorA > 0 then
-            local bias = getDepthBias2D(id)
-            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
-            local depth = (view3d and p and p.camZ) or bias
-            sphereShadeItems[#sphereShadeItems+1] = { id=id, depth=depth, seq=#sphereShadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
-          end
-        end
-      end
-      sortLayerItems(sphereShadeItems)
-      for i=1,#sphereShadeItems do
-        local it = sphereShadeItems[i]
-        gc.color = Color{r=it.r,g=it.g,b=it.b,a=it.a}
-        drawFilledCircleGC(gc, it.p.x, it.p.y, it.p.r)
       end
     end
 
