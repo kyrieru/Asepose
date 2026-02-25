@@ -215,6 +215,7 @@ do
   local view3d = false
   local display_spheres = true
   shade_interiors = false
+  shade_depth = true
   shade_color = Color{r=180,g=180,b=180,a=255}
   occluded_line_alpha_pct = 45
   local order_alpha = false
@@ -443,9 +444,49 @@ do
   local nextId = 1
   local links = {}
   link_depth_bias_2d = {}
+  node_shade_color = {}
+  link_shade_color_2d = {}
   local selected = {}
   local selectedList = {}
   local lastSelected = nil
+
+  DEFAULT_SHADE_RGBA = { r=180, g=180, b=180, a=255 }
+
+  function copyRGBA(c)
+    return {
+      r = clamp(math.floor(tonumber(c and c.r) or DEFAULT_SHADE_RGBA.r), 0, 255),
+      g = clamp(math.floor(tonumber(c and c.g) or DEFAULT_SHADE_RGBA.g), 0, 255),
+      b = clamp(math.floor(tonumber(c and c.b) or DEFAULT_SHADE_RGBA.b), 0, 255),
+      a = clamp(math.floor(tonumber(c and c.a) or DEFAULT_SHADE_RGBA.a), 0, 255),
+    }
+  end
+
+  function colorToRGBAData(c)
+    return {
+      r = clamp(math.floor(tonumber(c and (c.red or c.r)) or DEFAULT_SHADE_RGBA.r), 0, 255),
+      g = clamp(math.floor(tonumber(c and (c.green or c.g)) or DEFAULT_SHADE_RGBA.g), 0, 255),
+      b = clamp(math.floor(tonumber(c and (c.blue or c.b)) or DEFAULT_SHADE_RGBA.b), 0, 255),
+      a = clamp(math.floor(tonumber(c and (c.alpha or c.a)) or DEFAULT_SHADE_RGBA.a), 0, 255),
+    }
+  end
+
+  function rgbaDataToColor(c)
+    local k = copyRGBA(c)
+    return Color{r=k.r, g=k.g, b=k.b, a=k.a}
+  end
+
+  function getRenderSourceId(id)
+    local n = nodes[id]
+    if n
+      and (n.is_deform == true)
+      and n.parent and nodes[n.parent]
+      and n.deform_parent and n.deform_descendant
+      and nodes[n.deform_parent] and nodes[n.deform_descendant]
+    then
+      return n.parent
+    end
+    return id
+  end
 
   local function newId()
     local id = tostring(nextId)
@@ -486,6 +527,7 @@ do
       deform_u = 0.5,
       deform_v = 0,
     }
+    node_shade_color[id] = node_shade_color[id] and copyRGBA(node_shade_color[id]) or copyRGBA(DEFAULT_SHADE_RGBA)
     order[#order+1] = id
     return id
   end
@@ -592,15 +634,16 @@ do
     end
 
     for _,id in ipairs(selectedList) do
-      local n = nodes[id]
+      local src = getRenderSourceId(id)
+      local n = nodes[src]
       if n then n.prox_sign_2d = lv end
     end
 
     if #selectedList >= 2 then
       for i=1,(#selectedList-1) do
-        local a = selectedList[i]
-        for j=i+1,#selectedList do
-          local b = selectedList[j]
+          local a = getRenderSourceId(selectedList[i])
+          for j=i+1,#selectedList do
+          local b = getRenderSourceId(selectedList[j])
           link_depth_bias_2d[linkPairKey2D(a, b)] = lv
         end
       end
@@ -1383,6 +1426,8 @@ do
     roots = {}
     links = {}
     link_depth_bias_2d = {}
+    node_shade_color = {}
+    link_shade_color_2d = {}
     clearSelection()
     nextId = 1
 
@@ -1630,6 +1675,15 @@ do
       end
     end
     links = newLinks
+
+    local newLinkColors = {}
+    for k,c in pairs(link_shade_color_2d or {}) do
+      local a, b = string.match(tostring(k), "^([^:]+):([^:]+)$")
+      if a and b and nodes[tostring(a)] and nodes[tostring(b)] then
+        newLinkColors[linkColorKey2D(a, b)] = copyRGBA(c)
+      end
+    end
+    link_shade_color_2d = newLinkColors
   end
 
   local function collectSubtreeIds(rootId, out)
@@ -1679,6 +1733,9 @@ do
       nodes[nid].deform_v = tonumber(s.deform_v) or 0
       nodes[nid].deform_parent = (s.deform_parent and map[s.deform_parent]) or s.deform_parent
       nodes[nid].deform_descendant = (s.deform_descendant and map[s.deform_descendant]) or s.deform_descendant
+
+      local srcColor = getNodeShadeRGBA(sid)
+      node_shade_color[nid] = copyRGBA(srcColor)
     end
 
     local desiredW = {}
@@ -1788,6 +1845,13 @@ do
     end
     for k,_ in pairs(mirroredLinks) do links[k] = true end
 
+    for k,c in pairs(link_shade_color_2d or {}) do
+      local a, b = string.match(tostring(k), "^([^:]+):([^:]+)$")
+      if a and b and map[a] and map[b] then
+        link_shade_color_2d[linkColorKey2D(map[a], map[b])] = copyRGBA(c)
+      end
+    end
+
     buildChildren()
     computeWorldFromActiveLocals()
     setSingleSelection(map[rootId])
@@ -1833,6 +1897,12 @@ do
     end
     order = newOrder
 
+    local newNodeColors = {}
+    for _,id in ipairs(order) do
+      newNodeColors[id] = copyRGBA(node_shade_color[id] or DEFAULT_SHADE_RGBA)
+    end
+    node_shade_color = newNodeColors
+
     for _,id in ipairs(order) do
       local n = nodes[id]
       if n and n.is_deform == true then
@@ -1863,6 +1933,15 @@ do
       end
     end
     links = newLinks
+
+    local newLinkColors = {}
+    for k,c in pairs(link_shade_color_2d or {}) do
+      local a, b = string.match(tostring(k), "^([^:]+):([^:]+)$")
+      if a and b and nodes[tostring(a)] and nodes[tostring(b)] then
+        newLinkColors[linkColorKey2D(a, b)] = copyRGBA(c)
+      end
+    end
+    link_shade_color_2d = newLinkColors
 
     buildChildren()
     computeActiveLocalsFromWorld()
@@ -2206,6 +2285,9 @@ do
   end
 
   function shadeColorByBias(r, g, b, bias)
+    if shade_depth ~= true then
+      return clamp(math.floor(r + 0.5), 0, 255), clamp(math.floor(g + 0.5), 0, 255), clamp(math.floor(b + 0.5), 0, 255)
+    end
     local b01 = clamp(tonumber(bias) or 0, -1, 1)
     local f = 1.0 + (0.5 * b01) -- -1 => 0.5 (darker), +1 => 1.5 (brighter)
     local rr = clamp(math.floor((r * f) + 0.5), 0, 255)
@@ -2294,19 +2376,83 @@ do
   end
 
   function get2DFillDepth(id)
-    local n = nodes[id]
+    local src = getRenderSourceId(id)
+    local n = nodes[src]
     return clamp(tonumber(n and n.prox_sign_2d) or 0, -1, 1)
   end
 
   function get2DFillDepthVisual(id, visualDepthMap)
-    return clamp(tonumber(visualDepthMap and visualDepthMap[id]) or 0, -1, 1)
+    local src = getRenderSourceId(id)
+    return clamp(tonumber(visualDepthMap and visualDepthMap[src]) or 0, -1, 1)
   end
 
   function get2DLinkFillDepth(a, b, visualDepthMap)
+    a = getRenderSourceId(a)
+    b = getRenderSourceId(b)
     local k = linkPairKey2D(a, b)
     local v = link_depth_bias_2d[k]
     if v == nil then return 0 end
     return snapBiasForVisualDepth(v)
+  end
+
+  function linkColorKey2D(a, b)
+    a = getRenderSourceId(a)
+    b = getRenderSourceId(b)
+    return linkPairKey2D(a, b)
+  end
+
+  function getNodeShadeRGBA(id)
+    local src = getRenderSourceId(id)
+    local c = node_shade_color[src]
+    if not c then
+      c = copyRGBA(DEFAULT_SHADE_RGBA)
+      node_shade_color[src] = c
+    end
+    return c
+  end
+
+  function getLinkShadeRGBA(a, b)
+    local k = linkColorKey2D(a, b)
+    local c = link_shade_color_2d[k]
+    if not c then
+      c = copyRGBA(DEFAULT_SHADE_RGBA)
+      link_shade_color_2d[k] = c
+    end
+    return c
+  end
+
+  function setShadeColorForSelection(color)
+    local c = colorToRGBAData(color)
+    if #selectedList < 1 then
+      if not lastSelected or not nodes[lastSelected] then return end
+      setSingleSelection(lastSelected)
+    end
+
+    for _,id in ipairs(selectedList) do
+      local src = getRenderSourceId(id)
+      node_shade_color[src] = copyRGBA(c)
+    end
+
+    if #selectedList >= 2 then
+      for i=1,(#selectedList-1) do
+        local a = selectedList[i]
+        for j=i+1,#selectedList do
+          local b = selectedList[j]
+          link_shade_color_2d[linkColorKey2D(a, b)] = copyRGBA(c)
+        end
+      end
+    end
+  end
+
+  function getSelectionShadeColor()
+    if #selectedList >= 2 then
+      return rgbaDataToColor(getLinkShadeRGBA(selectedList[1], selectedList[2]))
+    end
+    local id = lastSelected or selectedList[1]
+    if id and nodes[id] then
+      return rgbaDataToColor(getNodeShadeRGBA(id))
+    end
+    return rgbaDataToColor(DEFAULT_SHADE_RGBA)
   end
 
   function get2DSortDepthFromBias(bias)
@@ -2328,9 +2474,15 @@ do
     local a = clamp(math.floor(tonumber(baseAlpha) or 255), 0, 255)
     local d = tonumber(strokeDepth)
     if a <= 0 or d == nil or nearestDepth == nil then return a end
+    local pct = clamp(tonumber(occluded_line_alpha_pct) or 45, 0, 100)
     if d > (nearestDepth + 1e-6) then
-      local pct = clamp(tonumber(occluded_line_alpha_pct) or 45, 0, 100)
-      return clamp(math.floor(a * (pct / 100.0) + 0.5), 0, 255)
+      local fade = (pct - 25) / 75
+      fade = clamp(fade, 0, 1)
+      return clamp(math.floor(a * fade + 0.5), 0, 255)
+    end
+    if pct < 25 then
+      local overFade = clamp(pct / 25, 0, 1)
+      return clamp(math.floor(a * overFade + 0.5), 0, 255)
     end
     return a
   end
@@ -2623,7 +2775,6 @@ do
     local visualDepthMap = buildVisualDepthBiasMap(effZ)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
-    local sr, sg, sb, sa = colorToRGBA(shade_color)
 
     local img = Image(spr.width, spr.height, spr.colorMode)
     img:clear()
@@ -2660,12 +2811,13 @@ do
                 local pa, pb = projRaster[e.a], projRaster[e.b]
                 if pa and pb then
                   local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                  local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+                  local linkCol = getLinkShadeRGBA(e.a, e.b)
+                  local interiorA = clamp(math.floor((aa * (linkCol.a or 255)) / 255 + 0.5), 0, 255)
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
                       local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-                      local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+                      local rr, gg, bb = shadeColorByBias(linkCol.r, linkCol.g, linkCol.b, bias)
                       local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
                       shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
                     end
@@ -2686,10 +2838,11 @@ do
         if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
           local aa = alphaMap[id] or 255
           if selected[id] == true then aa = 255 end
-          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          local nodeCol = getNodeShadeRGBA(id)
+          local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
           if interiorA > 0 then
             local bias = get2DFillDepthVisual(id, visualDepthMap)
-            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
             local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
             shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
           end
@@ -2955,6 +3108,7 @@ do
     else
       dlg:modify{ id="link_pair", enabled=false, selected=false }
     end
+    dlg:modify{ id="shade_color", color=getSelectionShadeColor() }
   end
 
   local function updateSphereUI(dlg)
@@ -3004,7 +3158,7 @@ do
     buildChildren()
 
     local data = {}
-    data["version"] = 13
+    data["version"] = 14
     data["node_count"] = #order
     data["mirror_mods"] = (mirror_mods == true)
     data["limit_range"] = (limit_range == true)
@@ -3016,6 +3170,7 @@ do
     data["view_3d"] = (view3d == true)
     data["display_spheres"] = (display_spheres == true)
     data["shade_interiors"] = (shade_interiors == true)
+    data["shade_depth"] = (shade_depth == true)
     data["occluded_line_alpha_pct"] = clamp(math.floor((tonumber(occluded_line_alpha_pct) or 45) + 0.5), 0, 100)
     do
       local sr0, sg0, sb0, sa0 = colorToRGBA(shade_color)
@@ -3103,6 +3258,38 @@ do
       data["link_depth_"..i.."_val"] = it.val
     end
 
+    local nodeShadeKeys = {}
+    for id,c in pairs(node_shade_color or {}) do
+      if nodes[id] and c then
+        nodeShadeKeys[#nodeShadeKeys+1] = { id=tostring(id), c=copyRGBA(c) }
+      end
+    end
+    table.sort(nodeShadeKeys, function(a,b) return tostring(a.id) < tostring(b.id) end)
+    data["node_shade_count"] = #nodeShadeKeys
+    for i,it in ipairs(nodeShadeKeys) do
+      data["node_shade_"..i.."_id"] = it.id
+      data["node_shade_"..i.."_r"] = it.c.r
+      data["node_shade_"..i.."_g"] = it.c.g
+      data["node_shade_"..i.."_b"] = it.c.b
+      data["node_shade_"..i.."_a"] = it.c.a
+    end
+
+    local linkShadeKeys = {}
+    for k,c in pairs(link_shade_color_2d or {}) do
+      if c then
+        linkShadeKeys[#linkShadeKeys+1] = { key=tostring(k), c=copyRGBA(c) }
+      end
+    end
+    table.sort(linkShadeKeys, function(a,b) return tostring(a.key) < tostring(b.key) end)
+    data["link_shade_count"] = #linkShadeKeys
+    for i,it in ipairs(linkShadeKeys) do
+      data["link_shade_"..i.."_key"] = it.key
+      data["link_shade_"..i.."_r"] = it.c.r
+      data["link_shade_"..i.."_g"] = it.c.g
+      data["link_shade_"..i.."_b"] = it.c.b
+      data["link_shade_"..i.."_a"] = it.c.a
+    end
+
     local ok, err = saveKeyValueFile(path, data)
     if not ok then app.alert(err or "Save failed.") end
   end
@@ -3120,6 +3307,8 @@ do
     roots = {}
     links = {}
     link_depth_bias_2d = {}
+    node_shade_color = {}
+    link_shade_color_2d = {}
     clearSelection()
     nextId = 1
 
@@ -3138,6 +3327,7 @@ do
     view3d = (t.view_3d == true)
     display_spheres = (t.display_spheres ~= false)
     shade_interiors = (t.shade_interiors == true)
+    shade_depth = (t.shade_depth ~= false)
     local loadR = clamp(tonumber(t.shade_r) or 180, 0, 255)
     local loadG = clamp(tonumber(t.shade_g) or 180, 0, 255)
     local loadB = clamp(tonumber(t.shade_b) or 180, 0, 255)
@@ -3264,6 +3454,36 @@ do
         local a, b = string.match(k, "^([^:]+):([^:]+)$")
         if a and b and nodes[tostring(a)] and nodes[tostring(b)] then
           link_depth_bias_2d[linkPairKey2D(a, b)] = clamp(v, -1, 1)
+        end
+      end
+    end
+
+    local nscount = tonumber(t.node_shade_count) or 0
+    for i=1,nscount do
+      local id = tostring(t["node_shade_"..i.."_id"] or "")
+      if id ~= "" and nodes[id] then
+        node_shade_color[id] = {
+          r = clamp(math.floor(tonumber(t["node_shade_"..i.."_r"]) or DEFAULT_SHADE_RGBA.r), 0, 255),
+          g = clamp(math.floor(tonumber(t["node_shade_"..i.."_g"]) or DEFAULT_SHADE_RGBA.g), 0, 255),
+          b = clamp(math.floor(tonumber(t["node_shade_"..i.."_b"]) or DEFAULT_SHADE_RGBA.b), 0, 255),
+          a = clamp(math.floor(tonumber(t["node_shade_"..i.."_a"]) or DEFAULT_SHADE_RGBA.a), 0, 255),
+        }
+      end
+    end
+
+    local lscount = tonumber(t.link_shade_count) or 0
+    for i=1,lscount do
+      local k = tostring(t["link_shade_"..i.."_key"] or "")
+      if k ~= "" then
+        local a, b = string.match(k, "^([^:]+):([^:]+)$")
+        if a and b and nodes[tostring(a)] and nodes[tostring(b)] then
+          local nk = linkColorKey2D(a, b)
+          link_shade_color_2d[nk] = {
+            r = clamp(math.floor(tonumber(t["link_shade_"..i.."_r"]) or DEFAULT_SHADE_RGBA.r), 0, 255),
+            g = clamp(math.floor(tonumber(t["link_shade_"..i.."_g"]) or DEFAULT_SHADE_RGBA.g), 0, 255),
+            b = clamp(math.floor(tonumber(t["link_shade_"..i.."_b"]) or DEFAULT_SHADE_RGBA.b), 0, 255),
+            a = clamp(math.floor(tonumber(t["link_shade_"..i.."_a"]) or DEFAULT_SHADE_RGBA.a), 0, 255),
+          }
         end
       end
     end
@@ -4037,7 +4257,6 @@ do
     local visualDepthMap = buildVisualDepthBiasMap(effZ)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
-    local sr, sg, sb, sa = colorToRGBA(shade_color)
 
     if view3d then draw3DFloorGrid(gc) end
 
@@ -4073,12 +4292,13 @@ do
                 local pa, pb = projRaster[e.a], projRaster[e.b]
                 if pa and pb then
                   local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                  local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+                  local linkCol = getLinkShadeRGBA(e.a, e.b)
+                  local interiorA = clamp(math.floor((aa * (linkCol.a or 255)) / 255 + 0.5), 0, 255)
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
                       local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-                      local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+                      local rr, gg, bb = shadeColorByBias(linkCol.r, linkCol.g, linkCol.b, bias)
                       local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
                       shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
                     end
@@ -4099,10 +4319,11 @@ do
         if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
           local aa = alphaMap[id] or 255
           if selected[id] == true then aa = 255 end
-          local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
+          local nodeCol = getNodeShadeRGBA(id)
+          local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
           if interiorA > 0 then
             local bias = get2DFillDepthVisual(id, visualDepthMap)
-            local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
+            local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
             local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
             shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
           end
@@ -4301,7 +4522,7 @@ do
       dlg:modify{ id="limit_range", selected=(limit_range==true) }
       dlg:modify{ id="view_3d", selected=(view3d==true) }
       dlg:modify{ id="shade_interiors", selected=(shade_interiors==true) }
-      dlg:modify{ id="shade_color", color=shade_color }
+      dlg:modify{ id="shade_depth", selected=(shade_depth==true) }
       dlg:modify{ id="occluded_line_alpha", value=clamp(math.floor((tonumber(occluded_line_alpha_pct) or 45) + 0.5), 0, 100) }
       updateSphereUI(dlg)
       dlg:modify{ id="live", selected=(live_preview==true) }
@@ -4459,12 +4680,24 @@ do
       refreshUI()
     end
   }
+  dlg:check{
+    id="shade_depth",
+    label="",
+    text="shade depth",
+    selected=true,
+    onclick=function()
+      shade_depth = (dlg.data.shade_depth == true)
+      refreshUI()
+    end
+  }
   dlg:color{
     id="shade_color",
     label="shade color",
-    color=shade_color,
+    color=getSelectionShadeColor(),
     onchange=function()
-      shade_color = dlg.data.shade_color or shade_color
+      local c = dlg.data.shade_color or getSelectionShadeColor()
+      shade_color = c
+      setShadeColorForSelection(c)
       refreshUI()
     end
   }
@@ -5159,6 +5392,9 @@ do
 
   dlg:modify{ id="shade_interiors", selected=false }
   shade_interiors = false
+
+  dlg:modify{ id="shade_depth", selected=true }
+  shade_depth = true
 
   shade_color = Color{r=180,g=180,b=180,a=255}
   dlg:modify{ id="shade_color", color=shade_color }
