@@ -778,6 +778,7 @@ do
   local getDepthBias2D
   local apply2DProximityRadiusBoost
   local build2DProximityOverlapMap
+  local build2DVisualDepthRawMap
 
   -- =========================
   -- projection
@@ -1861,6 +1862,22 @@ do
     computeWorldFromActiveLocals()
   end
 
+  local function resetDepthBiasForSelection()
+    if selectionCount() < 1 then
+      if not lastSelected or not nodes[lastSelected] then return end
+      setSingleSelection(lastSelected)
+    end
+    for _,id in ipairs(selectedList) do
+      local n = nodes[id]
+      if n then
+        n.prox_sign_2d = 0
+      end
+    end
+    if drag and drag.active then
+      drag.depthBias = 0
+    end
+  end
+
   -- =========================
   -- drawing helpers
   -- =========================
@@ -2185,7 +2202,7 @@ do
     end)
   end
 
-  function sortIdsByVisualDepth(baseOrder, proj)
+  function sortIdsByVisualDepth(baseOrder, proj, visualDepthMap)
     local items = {}
     for i,id in ipairs(baseOrder or {}) do
       local p = proj and proj[id] or nil
@@ -2193,7 +2210,7 @@ do
       if view3d then
         depth = p and p.camZ
       else
-        depth = get2DSortDepthFromBias(get2DFillDepth(id))
+        depth = get2DSortDepthFromBias(get2DFillDepthVisual(id, visualDepthMap))
       end
       items[#items+1] = { id=id, depth=depth, seq=i }
     end
@@ -2203,17 +2220,76 @@ do
     return out
   end
 
+  local DEPTH_VISUAL_SNAP_LEVELS = { -1.0, -0.5, 0.0, 0.5, 1.0 }
+
+  function snapBiasForVisualDepth(bias)
+    local v = clamp(tonumber(bias) or 0, -1, 1)
+    local best = nil
+    local bestDist = nil
+    for i=1,#DEPTH_VISUAL_SNAP_LEVELS do
+      local lv = DEPTH_VISUAL_SNAP_LEVELS[i]
+      local d = math.abs(v - lv)
+      if (bestDist == nil) or (d < bestDist) then
+        best = lv
+        bestDist = d
+      end
+    end
+    if best ~= nil then
+      return best
+    end
+    return v
+  end
+
+  function buildVisualDepthBiasMap(effZ)
+    local out = {}
+
+    if view3d then
+      for _,id in ipairs(order or {}) do
+        local ez = (effZ and tonumber(effZ[id])) or 0
+        local raw = clamp((-ez) / 100.0, -1, 1) -- 3D color polarity: positive Z darker, negative Z brighter
+        out[id] = snapBiasForVisualDepth(raw)
+      end
+      return out
+    end
+
+    local raw2d = nil
+    if statePose then
+      local restWorld = computeRestWorldPositions()
+      raw2d = build2DVisualDepthRawMap(restWorld)
+    end
+
+    for _,id in ipairs(order or {}) do
+      local raw = 0
+      if raw2d and raw2d[id] ~= nil then
+        raw = tonumber(raw2d[id]) or 0
+      end
+      out[id] = snapBiasForVisualDepth(clamp(raw, -1, 1))
+    end
+
+    return out
+  end
+
   function get2DFillDepth(id)
     local n = nodes[id]
     return clamp(tonumber(n and n.prox_sign_2d) or 0, -1, 1)
   end
 
-  function get2DLinkFillDepth(a, b)
-    return clamp((get2DFillDepth(a) + get2DFillDepth(b)) * 0.5, -1, 1)
+  function get2DFillDepthVisual(id, visualDepthMap)
+    return clamp(tonumber(visualDepthMap and visualDepthMap[id]) or 0, -1, 1)
+  end
+
+  function get2DLinkFillDepth(a, b, visualDepthMap)
+    local na = nodes[a]
+    local nb = nodes[b]
+    if na and nb then
+      if na.parent == b then return get2DFillDepthVisual(a, visualDepthMap) end
+      if nb.parent == a then return get2DFillDepthVisual(b, visualDepthMap) end
+    end
+    return snapBiasForVisualDepth((get2DFillDepthVisual(a, visualDepthMap) + get2DFillDepthVisual(b, visualDepthMap)) * 0.5)
   end
 
   function get2DSortDepthFromBias(bias)
-    return -clamp(tonumber(bias) or 0, -1, 1)
+    return -snapBiasForVisualDepth(bias)
   end
 
 
@@ -2501,6 +2577,7 @@ do
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
     local projRaster = buildRasterProjectedMap(effZ, proj)
+    local visualDepthMap = buildVisualDepthBiasMap(effZ)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
     local sr, sg, sb, sa = colorToRGBA(shade_color)
@@ -2544,7 +2621,7 @@ do
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = get2DLinkFillDepth(e.a, e.b)
+                      local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
                       local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
                       local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
                       shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
@@ -2559,7 +2636,7 @@ do
     end
 
     if shade_interiors then
-      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj, visualDepthMap)
       for _,id in ipairs(sphereDrawOrder) do
         local p = projRaster[id]
         local pdot = proj[id]
@@ -2568,7 +2645,7 @@ do
           if selected[id] == true then aa = 255 end
           local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
           if interiorA > 0 then
-            local bias = get2DFillDepth(id)
+            local bias = get2DFillDepthVisual(id, visualDepthMap)
             local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
             local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
             shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
@@ -2605,7 +2682,7 @@ do
       end
     end
 
-    local drawOrder = sortIdsByVisualDepth(order, proj)
+    local drawOrder = sortIdsByVisualDepth(order, proj, visualDepthMap)
     for _,id in ipairs(drawOrder) do
       local p = projRaster[id]
       local pdot = proj[id]
@@ -3659,6 +3736,50 @@ do
     return out
   end
 
+
+  build2DVisualDepthRawMap = function(restWorld)
+    local out = {}
+    if not restWorld then return out end
+
+    buildChildren()
+
+    local function rec(id, parentEffective)
+      local n = nodes[id]
+      if not n then return end
+
+      local ownOverlap = 0.0
+      if n.parent and nodes[n.parent] then
+        local parentN = nodes[n.parent]
+        local R = restRangeToParent(id, restWorld)
+        if parentN and R and R > 1e-9 then
+          local dxp = (n.worldx or 0) - (parentN.worldx or 0)
+          local dyp = (n.worldy or 0) - (parentN.worldy or 0)
+          local d = math.sqrt(dxp*dxp + dyp*dyp)
+          ownOverlap = clamp(1.0 - (d / R), 0.0, 1.0)
+        end
+      end
+
+      local pe = tonumber(parentEffective) or 0.0
+      local bias = get2DFillDepth(id)
+      local raw = pe + (ownOverlap * bias)
+      if bias < 0 then
+        raw = raw + ((1.0 - ownOverlap) * bias)
+      end
+
+      out[id] = raw
+      local effective = math.max(0.0, raw)
+      for _,cid in ipairs(n.children or {}) do
+        rec(cid, effective)
+      end
+    end
+
+    for _,rid in ipairs(roots) do
+      rec(rid, 0.0)
+    end
+
+    return out
+  end
+
   getDepthBias2D = function(id)
     if id and nodes[id] then
       return clamp(tonumber(nodes[id].prox_sign_2d) or 0, -1, 1)
@@ -3825,6 +3946,7 @@ do
     local effZ = statePose and buildEffectiveZMap() or nil
     local proj = buildProjectedMap(effZ)
     local projRaster = buildRasterProjectedMap(effZ, proj)
+    local visualDepthMap = buildVisualDepthBiasMap(effZ)
     local alphaMap = buildAlphaMap(proj)
     local sphereRotMap = buildSphereRotRenderMap(projRaster)
     local sr, sg, sb, sa = colorToRGBA(shade_color)
@@ -3867,7 +3989,7 @@ do
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = get2DLinkFillDepth(e.a, e.b)
+                      local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
                       local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
                       local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
                       shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
@@ -3882,7 +4004,7 @@ do
     end
 
     if shade_interiors then
-      local sphereDrawOrder = sortIdsByVisualDepth(order, proj)
+      local sphereDrawOrder = sortIdsByVisualDepth(order, proj, visualDepthMap)
       for _,id in ipairs(sphereDrawOrder) do
         local p = projRaster[id]
         local pdot = proj[id]
@@ -3891,7 +4013,7 @@ do
           if selected[id] == true then aa = 255 end
           local interiorA = clamp(math.floor((aa * sa) / 255 + 0.5), 0, 255)
           if interiorA > 0 then
-            local bias = get2DFillDepth(id)
+            local bias = get2DFillDepthVisual(id, visualDepthMap)
             local rr, gg, bb = shadeColorByBias(sr, sg, sb, bias)
             local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
             shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
@@ -3928,7 +4050,7 @@ do
       end
     end
 
-    local drawOrder = sortIdsByVisualDepth(order, proj)
+    local drawOrder = sortIdsByVisualDepth(order, proj, visualDepthMap)
     for _,id in ipairs(drawOrder) do
       local p = projRaster[id]
       local pdot = proj[id]
@@ -4024,6 +4146,7 @@ do
       dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
       dlg:modify{ id="btn_revert_all", visible=(not isRest) }
+      dlg:modify{ id="btn_reset_depth", visible=(not isRest) }
       dlg:modify{ id="btn_reset_view_pose", visible=(not isRest) }
     end)
   end
@@ -4793,6 +4916,14 @@ do
     onclick=function()
       revertAllToRest()
       updateSphereUI(dlg)
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_reset_depth",
+    text="reset_depth",
+    onclick=function()
+      resetDepthBiasForSelection()
       refreshUI()
     end
   }
