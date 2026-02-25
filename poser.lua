@@ -1862,13 +1862,21 @@ do
   -- drawing helpers
   -- =========================
   local function getResBlock()
-    -- Keep block size in screen pixels independent from camera/2D zoom.
     local scale = clamp(tonumber(res_scale) or 1.0, 0.1, 1.0)
     return math.max(1, math.floor((1.0 / scale) + 0.5))
   end
 
-  local function drawLineGC_1px(gc, x0, y0, x1, y1)
+  local function getDrawBlock()
     local block = getResBlock()
+    if (not view3d) and ((tonumber(res_scale) or 1.0) < 0.999) then
+      local z = math.max(0.05, tonumber(view2d.zoom) or 1.0)
+      block = math.max(1, math.floor((block * z) + 0.5))
+    end
+    return block
+  end
+
+  local function drawLineGC_1px(gc, x0, y0, x1, y1)
+    local block = getDrawBlock()
     local function plotLow(lx, ly)
       if block <= 1 then
         gc:fillRect(Rectangle(lx, ly, 1, 1))
@@ -1942,7 +1950,7 @@ do
 
   local function drawCirclePolyline(gc, cx0, cy0, r, segments)
     if r < 1 then return end
-    local block = getResBlock()
+    local block = getDrawBlock()
     local lr = math.floor((r / block) + 0.5)
     if lr < 1 then lr = 1 end
     local lcx = math.floor((cx0 / block) + 0.5)
@@ -2013,7 +2021,7 @@ do
 
   local function drawLineSet(img, x0, y0, x1, y1, pix)
     if not pix then return end
-    local block = getResBlock()
+    local block = getDrawBlock()
     local function plotLow(lx, ly)
       if block <= 1 then
         drawPixelStrong(img, lx, ly, pix)
@@ -2049,7 +2057,7 @@ do
 
   local function drawCirclePolylineToImage(img, cx0, cy0, r, segments, pix)
     if r < 1 then return end
-    local block = getResBlock()
+    local block = getDrawBlock()
     local lr = math.floor((r / block) + 0.5)
     if lr < 1 then lr = 1 end
     local lcx = math.floor((cx0 / block) + 0.5)
