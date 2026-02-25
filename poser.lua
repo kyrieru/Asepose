@@ -100,6 +100,15 @@ do
     return (ev.altKey == true) or (ev.alt == true)
   end
 
+  function stepTriLevel(cur, dir)
+    local v = clamp(tonumber(cur) or 0, -1, 1)
+    local lv = 0
+    if v >= 0.5 then lv = 1 elseif v <= -0.5 then lv = -1 end
+    if dir > 0 then lv = math.min(1, lv + 1)
+    elseif dir < 0 then lv = math.max(-1, lv - 1) end
+    return lv
+  end
+
   -- =========================
   -- script folder + txt preset helpers (key=value)
   -- =========================
@@ -432,6 +441,7 @@ do
   local roots = {}
   local nextId = 1
   local links = {}
+  link_depth_bias_2d = {}
   local selected = {}
   local selectedList = {}
   local lastSelected = nil
@@ -563,6 +573,39 @@ do
     ids = sortedUniqueIds(ids)
     if #ids < 2 then return nil end
     return ids
+  end
+
+
+  function linkPairKey2D(a, b)
+    local ia = tonumber(a) or 0
+    local ib = tonumber(b) or 0
+    if ia > ib then ia, ib = ib, ia end
+    return tostring(ia) .. ":" .. tostring(ib)
+  end
+
+  function applyDepthLevelToSelection(level)
+    local lv = clamp(tonumber(level) or 0, -1, 1)
+    if #selectedList < 1 then
+      if not lastSelected or not nodes[lastSelected] then return end
+      setSingleSelection(lastSelected)
+    end
+
+    for _,id in ipairs(selectedList) do
+      local n = nodes[id]
+      if n then n.prox_sign_2d = lv end
+    end
+
+    if #selectedList >= 2 then
+      for i=1,(#selectedList-1) do
+        local a = selectedList[i]
+        for j=i+1,#selectedList do
+          local b = selectedList[j]
+          link_depth_bias_2d[linkPairKey2D(a, b)] = lv
+        end
+      end
+    end
+
+    if drag and drag.active then drag.depthBias = lv end
   end
 
   local function getSelectedGroupKey()
@@ -778,8 +821,6 @@ do
   local getDepthBias2D
   local apply2DProximityRadiusBoost
   local build2DProximityOverlapMap
-  local build2DVisualDepthRawMap
-  local compute2DDepthRaw
 
   -- =========================
   -- projection
@@ -1340,6 +1381,7 @@ do
     order = {}
     roots = {}
     links = {}
+    link_depth_bias_2d = {}
     clearSelection()
     nextId = 1
 
@@ -1864,19 +1906,7 @@ do
   end
 
   local function resetDepthBiasForSelection()
-    if selectionCount() < 1 then
-      if not lastSelected or not nodes[lastSelected] then return end
-      setSingleSelection(lastSelected)
-    end
-    for _,id in ipairs(selectedList) do
-      local n = nodes[id]
-      if n then
-        n.prox_sign_2d = 0
-      end
-    end
-    if drag and drag.active then
-      drag.depthBias = 0
-    end
+    applyDepthLevelToSelection(0)
   end
 
   -- =========================
@@ -2176,7 +2206,7 @@ do
 
   function shadeColorByBias(r, g, b, bias)
     local b01 = clamp(tonumber(bias) or 0, -1, 1)
-    local f = 1.1 + (0.9 * b01) -- -1 => 0.2 (much darker), +1 => 2.0 (toward white)
+    local f = 1.0 + (0.5 * b01) -- -1 => 0.5 (darker), +1 => 1.5 (brighter)
     local rr = clamp(math.floor((r * f) + 0.5), 0, 255)
     local gg = clamp(math.floor((g * f) + 0.5), 0, 255)
     local bb = clamp(math.floor((b * f) + 0.5), 0, 255)
@@ -2222,7 +2252,7 @@ do
     return out
   end
 
-  local DEPTH_VISUAL_SNAP_LEVELS = { -1.0, -0.5, 0.0, 0.5, 1.0 }
+  local DEPTH_VISUAL_SNAP_LEVELS = { -1.0, 0.0, 1.0 }
 
   function snapBiasForVisualDepth(bias)
     local v = clamp(tonumber(bias) or 0, -1, 1)
@@ -2254,17 +2284,8 @@ do
       return out
     end
 
-    local raw2d = nil
-    if statePose then
-      local restWorld = computeRestWorldPositions()
-      raw2d = build2DVisualDepthRawMap(restWorld)
-    end
-
     for _,id in ipairs(order or {}) do
-      local raw = 0
-      if raw2d and raw2d[id] ~= nil then
-        raw = tonumber(raw2d[id]) or 0
-      end
+      local raw = get2DFillDepth(id)
       out[id] = snapBiasForVisualDepth(clamp(raw, -1, 1))
     end
 
@@ -2281,13 +2302,10 @@ do
   end
 
   function get2DLinkFillDepth(a, b, visualDepthMap)
-    local na = nodes[a]
-    local nb = nodes[b]
-    if na and nb then
-      if na.parent == b then return get2DFillDepthVisual(a, visualDepthMap) end
-      if nb.parent == a then return get2DFillDepthVisual(b, visualDepthMap) end
-    end
-    return snapBiasForVisualDepth((get2DFillDepthVisual(a, visualDepthMap) + get2DFillDepthVisual(b, visualDepthMap)) * 0.5)
+    local k = linkPairKey2D(a, b)
+    local v = link_depth_bias_2d[k]
+    if v == nil then return 0 end
+    return snapBiasForVisualDepth(v)
   end
 
   function get2DSortDepthFromBias(bias)
@@ -3037,6 +3055,20 @@ do
       data["link_"..i.."_val"] = 1
     end
 
+    local linkDepthKeys = {}
+    for k,v in pairs(link_depth_bias_2d or {}) do
+      local n = tonumber(v)
+      if n ~= nil then
+        linkDepthKeys[#linkDepthKeys+1] = { key = k, val = clamp(n, -1, 1) }
+      end
+    end
+    table.sort(linkDepthKeys, function(a,b) return tostring(a.key) < tostring(b.key) end)
+    data["link_depth_count"] = #linkDepthKeys
+    for i,it in ipairs(linkDepthKeys) do
+      data["link_depth_"..i.."_key"] = it.key
+      data["link_depth_"..i.."_val"] = it.val
+    end
+
     local ok, err = saveKeyValueFile(path, data)
     if not ok then app.alert(err or "Save failed.") end
   end
@@ -3053,6 +3085,7 @@ do
     order = {}
     roots = {}
     links = {}
+    link_depth_bias_2d = {}
     clearSelection()
     nextId = 1
 
@@ -3184,6 +3217,18 @@ do
           local ids = parseLinkGroupKey(k)
           local nk = ids and linkGroupKey(ids) or nil
           if nk then links[nk] = true end
+        end
+      end
+    end
+
+    local ldcount = tonumber(t.link_depth_count) or 0
+    for i=1,ldcount do
+      local k = tostring(t["link_depth_"..i.."_key"] or "")
+      local v = tonumber(t["link_depth_"..i.."_val"])
+      if k ~= "" and v ~= nil then
+        local a, b = string.match(k, "^([^:]+):([^:]+)$")
+        if a and b and nodes[tostring(a)] and nodes[tostring(b)] then
+          link_depth_bias_2d[linkPairKey2D(a, b)] = clamp(v, -1, 1)
         end
       end
     end
@@ -4154,7 +4199,9 @@ do
       dlg:modify{ id="btn_reset_view_rest", visible=isRest }
       dlg:modify{ id="btn_revert", visible=(not isRest) }
       dlg:modify{ id="btn_revert_all", visible=(not isRest) }
-      dlg:modify{ id="btn_reset_depth", visible=(not isRest) }
+      dlg:modify{ id="btn_depth_low", visible=(not isRest) }
+      dlg:modify{ id="btn_depth_mid", visible=(not isRest) }
+      dlg:modify{ id="btn_depth_high", visible=(not isRest) }
       dlg:modify{ id="btn_reset_view_pose", visible=(not isRest) }
     end)
   end
@@ -4392,22 +4439,21 @@ do
 
       if drag.active and drag.id then
         if statePose then
-          local step = 0.2
-          local deltaBias = (dy > 0) and -step or step
+          local dir = (dy > 0) and -1 or 1
           if view3d then
+            local step = 0.2
+            local deltaBias = dir * step
             local cur = clamp(tonumber(depth_pref_bias) or 0, -1, 1)
             local b = clamp(cur + deltaBias, -1, 1)
             depth_pref_bias = b
             depth_pref_set = true
             drag.depthBias = b
-          else
+          elseif not drag.right then
+            local cur = 0
             local dn = nodes[drag.id]
-            if dn then
-              local cur = clamp(tonumber(dn.prox_sign_2d) or 0, -1, 1)
-              local b = clamp(cur + deltaBias, -1, 1)
-              dn.prox_sign_2d = b
-              drag.depthBias = b
-            end
+            if dn then cur = dn.prox_sign_2d end
+            local b = stepTriLevel(cur, dir)
+            applyDepthLevelToSelection(b)
           end
           refreshUI()
         end
@@ -4444,7 +4490,7 @@ do
             end
           end
         else
-          if #selectedList > 0 and isCursorOverSelected(mx, my, proj) then
+          if (not statePose) and #selectedList > 0 and isCursorOverSelected(mx, my, proj) then
             beginMMBAdjust(ev)
           else
             if evAlt(ev) then
@@ -4928,10 +4974,26 @@ do
     end
   }
   dlg:button{
-    id="btn_reset_depth",
-    text="reset_depth",
+    id="btn_depth_low",
+    text="low depth",
+    onclick=function()
+      applyDepthLevelToSelection(-1)
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_depth_mid",
+    text="mid depth",
     onclick=function()
       resetDepthBiasForSelection()
+      refreshUI()
+    end
+  }
+  dlg:button{
+    id="btn_depth_high",
+    text="high depth",
+    onclick=function()
+      applyDepthLevelToSelection(1)
       refreshUI()
     end
   }
