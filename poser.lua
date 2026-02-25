@@ -853,9 +853,9 @@ do
         local base = rr.base
         local r = rr.r
         local ow = offsetWorld[id] or { x = n.worldx or 0, y = n.worldy or 0 }
-        local sx = ow.x + view2d.panx
-        local sy = ow.y + view2d.pany
-        proj[id] = { x = sx, y = sy, r = r, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
+        local sx = cx + (ow.x - cx) * view2d.zoom + view2d.panx
+        local sy = cy + (ow.y - cy) * view2d.zoom + view2d.pany
+        proj[id] = { x = sx, y = sy, r = r * view2d.zoom, base = base, zpix = 0, camX = nil, camY = nil, camZ = nil }
       end
     end
     return proj
