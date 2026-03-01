@@ -665,6 +665,90 @@ do
     return pairsOut
   end
 
+  function collectLinkedGroupsWithinSelection(ids)
+    local groupsOut = {}
+    if not ids or #ids < 2 then return groupsOut end
+
+    local selectedSet = {}
+    for _,id in ipairs(ids) do
+      selectedSet[tostring(id)] = true
+    end
+
+    for k,v in pairs(links or {}) do
+      if v == true then
+        local groupIds = parseLinkGroupKey(k)
+        if groupIds then
+          local sharedCount = 0
+          for _,gid in ipairs(groupIds) do
+            if selectedSet[tostring(gid)] then
+              sharedCount = sharedCount + 1
+              if sharedCount >= 2 then break end
+            end
+          end
+          if sharedCount >= 2 then
+            groupsOut[#groupsOut+1] = { key=k, ids=groupIds }
+          end
+        end
+      end
+    end
+
+    return groupsOut
+  end
+
+  function setLinkDepthForGroupIds(ids, bias)
+    if not ids then return end
+    local lv = clamp(tonumber(bias) or 0, -1, 1)
+    for i=1,(#ids-1) do
+      for j=i+1,#ids do
+        local a = getRenderSourceId(ids[i])
+        local b = getRenderSourceId(ids[j])
+        link_depth_bias_2d[linkPairKey2D(a, b)] = lv
+      end
+    end
+  end
+
+  function setLinkShadeForGroupIds(ids, rgba)
+    if not ids or not rgba then return end
+    local c = copyRGBA(rgba)
+    for i=1,(#ids-1) do
+      for j=i+1,#ids do
+        local a = getRenderSourceId(ids[i])
+        local b = getRenderSourceId(ids[j])
+        link_shade_color_2d[linkColorKey2D(a, b)] = copyRGBA(c)
+      end
+    end
+  end
+
+  function getLinkGroupDepthBias(groupIds, visualDepthMap)
+    if not groupIds then return 0 end
+    for i=1,(#groupIds-1) do
+      for j=i+1,#groupIds do
+        local a = getRenderSourceId(groupIds[i])
+        local b = getRenderSourceId(groupIds[j])
+        local k = linkPairKey2D(a, b)
+        local v = link_depth_bias_2d[k]
+        if v ~= nil then
+          return get2DLinkFillDepth(a, b, visualDepthMap)
+        end
+      end
+    end
+    return 0
+  end
+
+  function getLinkGroupShadeRGBA(groupIds)
+    if not groupIds then return copyRGBA(DEFAULT_SHADE_RGBA) end
+    for i=1,(#groupIds-1) do
+      for j=i+1,#groupIds do
+        local a = getRenderSourceId(groupIds[i])
+        local b = getRenderSourceId(groupIds[j])
+        local k = linkColorKey2D(a, b)
+        local c = link_shade_color_2d[k]
+        if c then return copyRGBA(c) end
+      end
+    end
+    return copyRGBA(DEFAULT_SHADE_RGBA)
+  end
+
   function selectAllLinkedTo(id)
     if not id or not nodes[id] then return false end
     local gathered = { id }
@@ -720,16 +804,37 @@ do
       setSingleSelection(lastSelected)
     end
 
-    local linkedPairs = collectLinkedPairsWithinSelection(selectedList)
+    local linkedGroups = collectLinkedGroupsWithinSelection(selectedList)
 
-    for _,id in ipairs(selectedList) do
-      local src = getRenderSourceId(id)
-      local n = nodes[src]
-      if n then n.prox_sign_2d = lv end
+    for _,group in ipairs(linkedGroups) do
+      setLinkDepthForGroupIds(group.ids, lv)
+      if mirror_mods then
+        local mirrored = {}
+        for _,gid in ipairs(group.ids) do
+          local m = nodes[gid] and nodes[gid].mirror
+          if not (m and nodes[m]) then mirrored = nil break end
+          mirrored[#mirrored+1] = m
+        end
+        if mirrored and #mirrored >= 2 then
+          setLinkDepthForGroupIds(mirrored, lv)
+        end
+      end
     end
 
-    for _,pair in ipairs(linkedPairs) do
-      link_depth_bias_2d[linkPairKey2D(pair.a, pair.b)] = lv
+    if #linkedGroups == 0 then
+      for _,id in ipairs(selectedList) do
+        local src = getRenderSourceId(id)
+        local n = nodes[src]
+        if n then n.prox_sign_2d = lv end
+        if mirror_mods then
+          local m = nodes[id] and nodes[id].mirror
+          if m and nodes[m] then
+            local ms = getRenderSourceId(m)
+            local mn = nodes[ms]
+            if mn then mn.prox_sign_2d = lv end
+          end
+        end
+      end
     end
 
     if drag and drag.active then drag.depthBias = lv end
@@ -2516,26 +2621,32 @@ do
       setSingleSelection(lastSelected)
     end
 
-    local linkedPairs = collectLinkedPairsWithinSelection(selectedList)
+    local linkedGroups = collectLinkedGroupsWithinSelection(selectedList)
 
-    for _,id in ipairs(selectedList) do
-      local src = getRenderSourceId(id)
-      node_shade_color[src] = copyRGBA(c)
+    for _,group in ipairs(linkedGroups) do
+      setLinkShadeForGroupIds(group.ids, c)
       if mirror_mods then
-        local m = nodes[id] and nodes[id].mirror
-        if m and nodes[m] then
-          node_shade_color[getRenderSourceId(m)] = copyRGBA(c)
+        local mirrored = {}
+        for _,gid in ipairs(group.ids) do
+          local m = nodes[gid] and nodes[gid].mirror
+          if not (m and nodes[m]) then mirrored = nil break end
+          mirrored[#mirrored+1] = m
+        end
+        if mirrored and #mirrored >= 2 then
+          setLinkShadeForGroupIds(mirrored, c)
         end
       end
     end
 
-    for _,pair in ipairs(linkedPairs) do
-      link_shade_color_2d[linkColorKey2D(pair.a, pair.b)] = copyRGBA(c)
-      if mirror_mods then
-        local ma = nodes[pair.a] and nodes[pair.a].mirror
-        local mb = nodes[pair.b] and nodes[pair.b].mirror
-        if ma and mb and nodes[ma] and nodes[mb] then
-          link_shade_color_2d[linkColorKey2D(ma, mb)] = copyRGBA(c)
+    if #linkedGroups == 0 then
+      for _,id in ipairs(selectedList) do
+        local src = getRenderSourceId(id)
+        node_shade_color[src] = copyRGBA(c)
+        if mirror_mods then
+          local m = nodes[id] and nodes[id].mirror
+          if m and nodes[m] then
+            node_shade_color[getRenderSourceId(m)] = copyRGBA(c)
+          end
         end
       end
     end
@@ -2880,6 +2991,8 @@ do
 
     local linkGroups = {}
     local shadeItems = {}
+    local topLinkCircleShade = {}
+    local linkedCircleSet = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -2889,12 +3002,24 @@ do
             local cx0, cy0, ccount = 0, 0, 0
             local groupCircles = {}
             local seenCircle = {}
+            local bias = getLinkGroupDepthBias(ids, visualDepthMap)
+            local groupDepth = nil
+            local groupColor = getLinkGroupShadeRGBA(ids)
             for _,id in ipairs(ids) do
               local p0 = projRaster[id]
               if p0 and not seenCircle[id] then
                 seenCircle[id] = true
+                linkedCircleSet[id] = true
                 groupCircles[#groupCircles+1] = { x=p0.x, y=p0.y, r=p0.r or 0 }
+                if view3d and p0.camZ then
+                  if (groupDepth == nil) or (p0.camZ < groupDepth) then groupDepth = p0.camZ end
+                end
               end
+            end
+            if not view3d then
+              groupDepth = get2DSortDepthFromBias(bias)
+            elseif groupDepth == nil then
+              groupDepth = 0
             end
             for _,e in ipairs(edges) do
               local pa = projRaster[e.a]
@@ -2903,22 +3028,35 @@ do
               if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
             if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
-            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles }
+            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles, depth=groupDepth, bias=bias, color=groupColor }
 
             if shade_interiors then
+              local rr, gg, bb = shadeColorByBias(groupColor.r, groupColor.g, groupColor.b, bias)
               for _,e in ipairs(edges) do
                 local pa, pb = projRaster[e.a], projRaster[e.b]
                 if pa and pb then
                   local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                  local linkCol = getLinkShadeRGBA(e.a, e.b)
-                  local interiorA = clamp(math.floor((aa * (linkCol.a or 255)) / 255 + 0.5), 0, 255)
+                  local interiorA = clamp(math.floor((aa * (groupColor.a or 255)) / 255 + 0.5), 0, 255)
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-                      local rr, gg, bb = shadeColorByBias(linkCol.r, linkCol.g, linkCol.b, bias)
-                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
-                      shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                      shadeItems[#shadeItems+1] = { id=(k .. ":" .. e.a .. ":" .. e.b), kind="quad", depth=groupDepth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                    end
+                  end
+                end
+              end
+
+              for _,id in ipairs(ids) do
+                local p = projRaster[id]
+                local pdot = proj[id]
+                if p and pdot and nodes[id] then
+                  local aa = alphaMap[id] or 255
+                  if selected[id] == true then aa = 255 end
+                  local interiorA = clamp(math.floor((aa * (groupColor.a or 255)) / 255 + 0.5), 0, 255)
+                  if interiorA > 0 then
+                    local cur = topLinkCircleShade[id]
+                    if (cur == nil) or (groupDepth < cur.depth) then
+                      topLinkCircleShade[id] = { depth=groupDepth, a=interiorA, r=rr, g=gg, b=bb }
                     end
                   end
                 end
@@ -2934,16 +3072,21 @@ do
       for _,id in ipairs(sphereDrawOrder) do
         local p = projRaster[id]
         local pdot = proj[id]
-        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
-          local aa = alphaMap[id] or 255
-          if selected[id] == true then aa = 255 end
-          local nodeCol = getNodeShadeRGBA(id)
-          local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
-          if interiorA > 0 then
-            local bias = get2DFillDepthVisual(id, visualDepthMap)
-            local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
-            local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
-            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+        if p and pdot and nodes[id] then
+          local linkShade = topLinkCircleShade[id]
+          if linkShade then
+            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=linkShade.depth, seq=#shadeItems+1, p=p, a=linkShade.a, r=linkShade.r, g=linkShade.g, b=linkShade.b }
+          elseif not linkedCircleSet[id] and (display_spheres == true) and (nodes[id].sphere ~= false) then
+            local aa = alphaMap[id] or 255
+            if selected[id] == true then aa = 255 end
+            local nodeCol = getNodeShadeRGBA(id)
+            local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
+            if interiorA > 0 then
+              local bias = get2DFillDepthVisual(id, visualDepthMap)
+              local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
+              local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
+              shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+            end
           end
         end
       end
@@ -2968,8 +3111,7 @@ do
         local pa, pb = projRaster[e.a], projRaster[e.b]
         if pa and pb then
           local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-          local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-          local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+          local depth = g.depth
           aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
           local pix = app.pixelColor.rgba(0, 0, 0, aa)
           if e.isPair == true then
@@ -4375,6 +4517,8 @@ do
 
     local linkGroups = {}
     local shadeItems = {}
+    local topLinkCircleShade = {}
+    local linkedCircleSet = {}
     for k,v in pairs(links) do
       if v == true then
         local ids = parseLinkGroupKey(k)
@@ -4384,12 +4528,24 @@ do
             local cx0, cy0, ccount = 0, 0, 0
             local groupCircles = {}
             local seenCircle = {}
+            local bias = getLinkGroupDepthBias(ids, visualDepthMap)
+            local groupDepth = nil
+            local groupColor = getLinkGroupShadeRGBA(ids)
             for _,id in ipairs(ids) do
               local p0 = projRaster[id]
               if p0 and not seenCircle[id] then
                 seenCircle[id] = true
+                linkedCircleSet[id] = true
                 groupCircles[#groupCircles+1] = { x=p0.x, y=p0.y, r=p0.r or 0 }
+                if view3d and p0.camZ then
+                  if (groupDepth == nil) or (p0.camZ < groupDepth) then groupDepth = p0.camZ end
+                end
               end
+            end
+            if not view3d then
+              groupDepth = get2DSortDepthFromBias(bias)
+            elseif groupDepth == nil then
+              groupDepth = 0
             end
             for _,e in ipairs(edges) do
               local pa = projRaster[e.a]
@@ -4398,22 +4554,35 @@ do
               if pb then cx0 = cx0 + pb.x; cy0 = cy0 + pb.y; ccount = ccount + 1 end
             end
             if ccount > 0 then cx0 = cx0 / ccount; cy0 = cy0 / ccount end
-            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles }
+            linkGroups[#linkGroups+1] = { edges=edges, cx0=cx0, cy0=cy0, circles=groupCircles, depth=groupDepth, bias=bias, color=groupColor }
 
             if shade_interiors then
+              local rr, gg, bb = shadeColorByBias(groupColor.r, groupColor.g, groupColor.b, bias)
               for _,e in ipairs(edges) do
                 local pa, pb = projRaster[e.a], projRaster[e.b]
                 if pa and pb then
                   local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-                  local linkCol = getLinkShadeRGBA(e.a, e.b)
-                  local interiorA = clamp(math.floor((aa * (linkCol.a or 255)) / 255 + 0.5), 0, 255)
+                  local interiorA = clamp(math.floor((aa * (groupColor.a or 255)) / 255 + 0.5), 0, 255)
                   if interiorA > 0 then
                     local quad = buildBridgeQuad(pa.x, pa.y, pb.x, pb.y, pa.r, pb.r)
                     if quad then
-                      local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-                      local rr, gg, bb = shadeColorByBias(linkCol.r, linkCol.g, linkCol.b, bias)
-                      local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
-                      shadeItems[#shadeItems+1] = { id=(e.a .. ":" .. e.b), kind="quad", depth=depth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                      shadeItems[#shadeItems+1] = { id=(k .. ":" .. e.a .. ":" .. e.b), kind="quad", depth=groupDepth, seq=#shadeItems+1, quad=quad, a=interiorA, r=rr, g=gg, b=bb }
+                    end
+                  end
+                end
+              end
+
+              for _,id in ipairs(ids) do
+                local p = projRaster[id]
+                local pdot = proj[id]
+                if p and pdot and nodes[id] then
+                  local aa = alphaMap[id] or 255
+                  if selected[id] == true then aa = 255 end
+                  local interiorA = clamp(math.floor((aa * (groupColor.a or 255)) / 255 + 0.5), 0, 255)
+                  if interiorA > 0 then
+                    local cur = topLinkCircleShade[id]
+                    if (cur == nil) or (groupDepth < cur.depth) then
+                      topLinkCircleShade[id] = { depth=groupDepth, a=interiorA, r=rr, g=gg, b=bb }
                     end
                   end
                 end
@@ -4429,16 +4598,21 @@ do
       for _,id in ipairs(sphereDrawOrder) do
         local p = projRaster[id]
         local pdot = proj[id]
-        if p and pdot and (display_spheres == true) and (nodes[id] and nodes[id].sphere ~= false) then
-          local aa = alphaMap[id] or 255
-          if selected[id] == true then aa = 255 end
-          local nodeCol = getNodeShadeRGBA(id)
-          local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
-          if interiorA > 0 then
-            local bias = get2DFillDepthVisual(id, visualDepthMap)
-            local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
-            local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
-            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+        if p and pdot and nodes[id] then
+          local linkShade = topLinkCircleShade[id]
+          if linkShade then
+            shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=linkShade.depth, seq=#shadeItems+1, p=p, a=linkShade.a, r=linkShade.r, g=linkShade.g, b=linkShade.b }
+          elseif not linkedCircleSet[id] and (display_spheres == true) and (nodes[id].sphere ~= false) then
+            local aa = alphaMap[id] or 255
+            if selected[id] == true then aa = 255 end
+            local nodeCol = getNodeShadeRGBA(id)
+            local interiorA = clamp(math.floor((aa * (nodeCol.a or 255)) / 255 + 0.5), 0, 255)
+            if interiorA > 0 then
+              local bias = get2DFillDepthVisual(id, visualDepthMap)
+              local rr, gg, bb = shadeColorByBias(nodeCol.r, nodeCol.g, nodeCol.b, bias)
+              local depth = (view3d and p and p.camZ) or get2DSortDepthFromBias(bias)
+              shadeItems[#shadeItems+1] = { id=id, kind="circle", depth=depth, seq=#shadeItems+1, p=p, a=interiorA, r=rr, g=gg, b=bb }
+            end
           end
         end
       end
@@ -4463,8 +4637,7 @@ do
         local pa, pb = projRaster[e.a], projRaster[e.b]
         if pa and pb then
           local aa = math.min(alphaMap[e.a] or 255, alphaMap[e.b] or 255)
-          local bias = get2DLinkFillDepth(e.a, e.b, visualDepthMap)
-          local depth = (view3d and pa.camZ and pb.camZ) and ((pa.camZ + pb.camZ) * 0.5) or get2DSortDepthFromBias(bias)
+          local depth = g.depth
           aa = fadeStrokeAlphaBehindFills(aa, depth, nearestShadeDepth)
           gc.color = Color{r=0,g=0,b=0,a=aa}
           if e.isPair == true then
@@ -5453,8 +5626,14 @@ do
     selected=true,
     enabled=false,
     onclick=function()
-      if lastSelected and nodes[lastSelected] then
-        nodes[lastSelected].sphere = (dlg.data.sphere_vert == true)
+      local on = (dlg.data.sphere_vert == true)
+      if #selectedList > 0 then
+        for _,id in ipairs(selectedList) do
+          if nodes[id] then nodes[id].sphere = on end
+        end
+        refreshUI()
+      elseif lastSelected and nodes[lastSelected] then
+        nodes[lastSelected].sphere = on
         refreshUI()
       else
         updateSphereUI(dlg)
